@@ -1,0 +1,43 @@
+server:
+  listen: ":8080"
+  public_url: "https://indieauth.example.org"
+  issuer: "https://indieauth.example.org"
+  trusted_proxies: []
+
+security:
+  cookie_secret: "replace-with-at-least-32-random-bytes"
+  code_ttl: "5m"
+  auth_request_ttl: "10m"
+  access_token_ttl: "24h"
+  require_https: true
+  require_pkce: true
+  dev_mode: false
+
+profiles:
+  - me: "https://eric.example/"
+    display_name: "Eric"
+    email: "eric@example.org"
+    backend: "authentik"
+    allowed_subjects:
+      - "authentik-user-sub"
+    allowed_usernames:
+      - "eric"
+    allowed_emails:
+      - "eric@example.org"
+    allowed_groups: []
+
+backends:
+  authentik:
+    type: "authentik"
+    issuer: "https://auth.example.org/application/o/indieauth/"
+    client_id: "replace-me"
+    client_secret: "replace-me"
+    redirect_uri: "https://indieauth.example.org/auth/callback"
+    scopes:
+      - openid
+      - profile
+      - email
+
+storage:
+  type: "sqlite"
+  path: "/data/bridge.db"

@@ -1,0 +1,67 @@
+name: container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase image name
+        id: image
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute tags
+        id: meta
+        run: |
+          tags="${{ steps.image.outputs.name }}:${GITHUB_SHA}"
+          version="${GITHUB_SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            tags="$tags ${{ steps.image.outputs.name }}:latest"
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            tags="$tags ${{ steps.image.outputs.name }}:${GITHUB_REF_NAME#v} ${{ steps.image.outputs.name }}:${GITHUB_REF_NAME}"
+          fi
+          {
+            echo "tags<<EOF"
+            printf '%s\n' $tags
+            echo "EOF"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ steps.image.outputs.name }}
+          tags: ${{ steps.meta.outputs.tags }}
+          containerfiles: ./Containerfile
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.description=Self-hostable IndieAuth-to-OIDC bridge with authentik support
+
+      - name: Login to GHCR
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ghcr.io

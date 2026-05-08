@@ -1,0 +1,9 @@
+/.env
+/indieauth-bridge
+/dist/
+/coverage.out
+/data/
+/config.local.yaml
+*.db
+*.db-shm
+*.db-wal

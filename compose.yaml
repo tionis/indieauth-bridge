@@ -1,0 +1,17 @@
+services:
+  indieauth-bridge:
+    image: indieauth-bridge:local
+    build:
+      context: .
+      dockerfile: Containerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./examples/config.yaml:/config/config.yaml:ro
+      - indieauth-bridge-data:/data
+    environment:
+      IAB_CONFIG: /config/config.yaml
+    restart: unless-stopped
+
+volumes:
+  indieauth-bridge-data:

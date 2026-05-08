@@ -1,0 +1,202 @@
+package bridgehttp
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/eric/indieauth-bridge/internal/backends"
+	"github.com/eric/indieauth-bridge/internal/config"
+	"github.com/eric/indieauth-bridge/internal/storage"
+)
+
+type fakeBackend struct {
+	state string
+}
+
+func (f fakeBackend) Name() string { return "authentik" }
+
+func (f fakeBackend) BeginAuth(ctx context.Context, req backends.AuthRequest) (string, backends.BackendState, error) {
+	return "https://auth.example/authorize?state=" + f.state, backends.BackendState{State: f.state, Nonce: "nonce"}, nil
+}
+
+func (f fakeBackend) CompleteAuth(ctx context.Context, callback backends.CallbackRequest, state backends.BackendState) (backends.Identity, error) {
+	return backends.Identity{Subject: "auth-sub", PreferredUsername: "eric", Email: "eric@example.org"}, nil
+}
+
+func TestMetadata(t *testing.T) {
+	app := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["issuer"] != "http://bridge.example" {
+		t.Fatalf("unexpected issuer: %v", body["issuer"])
+	}
+}
+
+func TestAuthorizeCallbackAndTokenFlow(t *testing.T) {
+	app := newTestServer(t)
+	handler := app.Routes()
+	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	challenge := pkceChallenge(verifier)
+
+	authURL := "/authorize?response_type=code&me=https%3A%2F%2Feric.example%2F&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&state=client-state&scope=profile+email&code_challenge=" + url.QueryEscape(challenge) + "&code_challenge_method=S256"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "https://auth.example/authorize?state=oidc-state" {
+		t.Fatalf("unexpected oidc redirect: %s", loc)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	callback, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callback.Scheme != "http" || callback.Host != "client.example" || callback.Query().Get("state") != "client-state" {
+		t.Fatalf("unexpected client redirect: %s", callback.String())
+	}
+	code := callback.Query().Get("code")
+	if code == "" {
+		t.Fatal("missing IndieAuth code")
+	}
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"client_id":     {"http://client.example/app"},
+		"redirect_uri":  {"http://client.example/callback"},
+		"code_verifier": {verifier},
+	}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var tokenBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &tokenBody); err != nil {
+		t.Fatal(err)
+	}
+	if tokenBody["me"] != "https://eric.example/" || tokenBody["token_type"] != "Bearer" || tokenBody["access_token"] == "" {
+		t.Fatalf("unexpected token response: %#v", tokenBody)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reused code status = %d", rec.Code)
+	}
+}
+
+func TestAuthorizeRejectsInvalidRedirect(t *testing.T) {
+	app := newTestServer(t)
+	challenge := pkceChallenge("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+	authURL := "/authorize?response_type=code&me=https%3A%2F%2Feric.example%2F&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fevil.example%2Fcallback&state=client-state&code_challenge=" + url.QueryEscape(challenge) + "&code_challenge_method=S256"
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestTokenRejectsBadPKCE(t *testing.T) {
+	app := newTestServer(t)
+	now := time.Now()
+	code := "manual-code"
+	challenge := pkceChallenge("correct-verifier-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	err := app.store.CreateAuthorizationCode(context.Background(), code, storage.AuthorizationCode{
+		Me:                  "https://eric.example/",
+		ClientID:            "http://client.example/app",
+		RedirectURI:         "http://client.example/callback",
+		CodeChallenge:       challenge,
+		CodeChallengeMethod: "S256",
+		ExpiresAt:           now.Add(time.Minute),
+		CreatedAt:           now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"client_id":     {"http://client.example/app"},
+		"redirect_uri":  {"http://client.example/callback"},
+		"code_verifier": {"wrong"},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Server.PublicURL = "http://bridge.example"
+	cfg.Server.Issuer = "http://bridge.example"
+	cfg.Security.CookieSecret = "change-me"
+	cfg.Security.DevMode = true
+	cfg.Profiles = []config.ProfileConfig{{
+		Me:              "https://eric.example/",
+		DisplayName:     "Eric",
+		Email:           "eric@example.org",
+		Backend:         "authentik",
+		AllowedSubjects: []string{"auth-sub"},
+	}}
+	cfg.Backends = map[string]config.BackendConfig{"authentik": {
+		Type: "authentik", Issuer: "http://auth.example/", ClientID: "id", ClientSecret: "secret", RedirectURI: "http://bridge.example/auth/callback",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.OpenSQLite(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	app := NewServer(cfg, store, map[string]backends.Backend{"authentik": fakeBackend{state: "oidc-state"}}, slog.New(slog.NewTextHandler(testWriter{t}, nil)))
+	app.now = time.Now
+	return app
+}
+
+type testWriter struct {
+	t *testing.T
+}
+
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSpace(string(p)))
+	return len(p), nil
+}
+
+func pkceChallenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=IndieAuth Bridge
+
+[Container]
+Image=ghcr.io/OWNER/indieauth-bridge:latest
+ContainerName=indieauth-bridge
+PublishPort=127.0.0.1:8080:8080
+Volume=/srv/indieauth-bridge/config.yaml:/config/config.yaml:ro
+Volume=/srv/indieauth-bridge/data:/data
+Environment=IAB_CONFIG=/config/config.yaml
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
