@@ -3,9 +3,9 @@ FROM docker.io/library/golang:1.25-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum* ./
-RUN go mod download
+COPY vendor ./vendor
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/indieauth-bridge ./cmd/indieauth-bridge
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags="-s -w" -o /out/indieauth-bridge ./cmd/indieauth-bridge
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
