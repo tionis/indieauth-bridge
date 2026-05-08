@@ -79,14 +79,14 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ steps.push.outputs.registry-path }}
+          subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
       - name: Attest SBOM
         uses: actions/attest-sbom@v2
         with:
-          subject-name: ${{ steps.push.outputs.registry-path }}
+          subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.push.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
