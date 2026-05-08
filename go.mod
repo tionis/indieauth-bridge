@@ -1,10 +1,10 @@
 module github.com/eric/indieauth-bridge
 
-go 1.23
+go 1.23.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.11.0
-	golang.org/x/oauth2 v0.24.0
+	golang.org/x/oauth2 v0.27.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.33.1
 )
