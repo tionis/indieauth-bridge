@@ -49,6 +49,35 @@ func TestMetadata(t *testing.T) {
 	}
 }
 
+func TestIndexLandingPage(t *testing.T) {
+	app := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Fatalf("unexpected content type: %s", contentType)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"IndieAuth authorization server",
+		"http://bridge.example/authorize",
+		"http://bridge.example/token",
+		"http://bridge.example/.well-known/oauth-authorization-server",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("landing page missing %q", want)
+		}
+	}
+	for _, leaked := range []string{"client-secret", "change-me", "auth-sub"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("landing page leaked sensitive or mapping value %q", leaked)
+		}
+	}
+}
+
 func TestAuthorizeCallbackAndTokenFlow(t *testing.T) {
 	app := newTestServer(t)
 	handler := app.Routes()

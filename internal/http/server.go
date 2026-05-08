@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +26,184 @@ type Server struct {
 	logger   *slog.Logger
 	now      func() time.Time
 }
+
+var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IndieAuth Bridge</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8f5;
+      --surface: #ffffff;
+      --ink: #1b1f23;
+      --muted: #5f6b76;
+      --line: #d9dfdf;
+      --accent: #0f766e;
+      --accent-ink: #063f3b;
+      --warn: #9a6700;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+    main {
+      width: min(1040px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 56px 0 40px;
+    }
+    header {
+      display: grid;
+      gap: 18px;
+      padding: 0 0 34px;
+      border-bottom: 1px solid var(--line);
+    }
+    .eyebrow {
+      color: var(--accent-ink);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 820px;
+      margin: 0;
+      font-size: clamp(34px, 7vw, 68px);
+      line-height: .98;
+      letter-spacing: 0;
+    }
+    .lede {
+      max-width: 720px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    a.button {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding: 9px 14px;
+      border: 1px solid var(--accent);
+      border-radius: 7px;
+      color: #fff;
+      background: var(--accent);
+      text-decoration: none;
+      font-weight: 700;
+    }
+    a.button.secondary {
+      color: var(--accent-ink);
+      background: transparent;
+    }
+    section {
+      padding: 30px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    h2 {
+      margin: 0 0 16px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .metric, .endpoint {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 16px;
+    }
+    .metric span, .endpoint span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .metric strong {
+      display: block;
+      margin-top: 7px;
+      font-size: 24px;
+    }
+    .endpoint {
+      display: grid;
+      gap: 8px;
+    }
+    .endpoint a {
+      overflow-wrap: anywhere;
+      color: var(--accent-ink);
+      font-weight: 700;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+    .note {
+      margin: 18px 0 0;
+      color: var(--warn);
+      font-size: 14px;
+    }
+    footer {
+      padding-top: 24px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 760px) {
+      main { width: min(100% - 24px, 1040px); padding-top: 34px; }
+      .grid { grid-template-columns: 1fr; }
+      h1 { font-size: 40px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">IndieAuth authorization server</div>
+      <h1>Sign in with a profile URL through your OIDC provider.</h1>
+      <p class="lede">This bridge accepts IndieAuth authorization requests for configured profile URLs and delegates authentication to an OIDC backend such as authentik.</p>
+      <div class="actions">
+        <a class="button" href="{{.MetadataURL}}">View metadata</a>
+        <a class="button secondary" href="{{.HealthURL}}">Check health</a>
+      </div>
+    </header>
+
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">Status</h2>
+      <div class="grid">
+        <div class="metric"><span>Issuer</span><strong>{{.Issuer}}</strong></div>
+        <div class="metric"><span>Profiles</span><strong>{{.ProfileCount}}</strong></div>
+        <div class="metric"><span>Backends</span><strong>{{.BackendNames}}</strong></div>
+      </div>
+      {{if .DevMode}}<p class="note">Development mode is enabled. Do not use this configuration for public traffic.</p>{{end}}
+    </section>
+
+    <section aria-labelledby="endpoints-heading">
+      <h2 id="endpoints-heading">Endpoints</h2>
+      <div class="grid">
+        <div class="endpoint"><span>Authorization</span><a href="{{.AuthorizeURL}}">{{.AuthorizeURL}}</a></div>
+        <div class="endpoint"><span>Token</span><a href="{{.TokenURL}}">{{.TokenURL}}</a></div>
+        <div class="endpoint"><span>Metadata</span><a href="{{.MetadataURL}}">{{.MetadataURL}}</a></div>
+      </div>
+    </section>
+
+    <footer>
+      Publish the metadata, authorization, and token links from your profile site so IndieAuth clients can discover this bridge.
+    </footer>
+  </main>
+</body>
+</html>`))
 
 func NewServer(cfg config.Config, store storage.Store, backendMap map[string]backends.Backend, logger *slog.Logger) *Server {
 	if logger == nil {
@@ -48,18 +228,33 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  "indieauth-bridge",
-		"issuer":   s.cfg.Server.Issuer,
-		"metadata": s.cfg.Server.Issuer + "/.well-known/oauth-authorization-server",
-	})
+	names := make([]string, 0, len(s.backends))
+	for name := range s.backends {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	data := map[string]any{
+		"Issuer":       s.cfg.Server.Issuer,
+		"AuthorizeURL": s.cfg.Server.PublicURL + "/authorize",
+		"TokenURL":     s.cfg.Server.PublicURL + "/token",
+		"MetadataURL":  s.cfg.Server.PublicURL + "/.well-known/oauth-authorization-server",
+		"HealthURL":    s.cfg.Server.PublicURL + "/healthz",
+		"ProfileCount": len(s.cfg.Profiles),
+		"BackendNames": strings.Join(names, ", "),
+		"DevMode":      s.cfg.Security.DevMode,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := landingTemplate.Execute(w, data); err != nil {
+		s.logger.Error("landing page render failed", "err", err)
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
