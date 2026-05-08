@@ -8,6 +8,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 jobs:
   build-and-push:
@@ -60,8 +62,31 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push image
+        id: push
         uses: redhat-actions/push-to-registry@v2
         with:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}
           registry: ghcr.io
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.push.outputs.registry-path }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.push.outputs.registry-path }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ steps.push.outputs.registry-path }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true

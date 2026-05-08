@@ -11,7 +11,15 @@ security:
   access_token_ttl: "24h"
   require_https: true
   require_pkce: true
+  consent_required: true
+  client_metadata_discovery_enabled: true
   dev_mode: false
+
+rate_limit:
+  enabled: true
+  requests_per_minute: 60
+  burst: 20
+  trusted_proxies: []
 
 profiles:
   - me: "https://eric.example/"

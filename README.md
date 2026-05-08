@@ -38,16 +38,17 @@ Secure defaults:
 - Authorization codes are short-lived, hashed at rest, and one-use.
 - Access tokens are stored hashed at rest.
 - OIDC state and nonce are generated with `crypto/rand` and validated.
-- Redirect URIs must share origin with `client_id` for the MVP.
+- Redirect URIs must either share origin with `client_id` or be declared by IndieAuth client metadata.
+- A consent screen is shown before the bridge redirects back to the IndieAuth client by default.
+- Public auth endpoints are protected by a small IP-based rate limiter.
 - Security headers and no-store token responses are set.
 - Callback URLs and tokens are not logged.
 
 Limitations:
 
 - Dynamic client registration is not implemented.
-- IndieAuth client metadata discovery is not yet implemented; redirect URI validation is same-origin with `client_id`.
 - SQLite is the only storage backend.
-- There is no consent screen in the MVP.
+- Rate limiting is in-process. Use sticky routing or a proxy-level limiter if you run multiple bridge replicas.
 
 ## Quick Start
 
@@ -91,7 +92,15 @@ security:
   access_token_ttl: "24h"
   require_https: true
   require_pkce: true
+  consent_required: true
+  client_metadata_discovery_enabled: true
   dev_mode: false
+
+rate_limit:
+  enabled: true
+  requests_per_minute: 60
+  burst: 20
+  trusted_proxies: []
 
 profiles:
   - me: "https://eric.example/"
@@ -126,6 +135,11 @@ Environment overrides use the `IAB_` prefix:
 - `IAB_SECURITY_DEV_MODE`
 - `IAB_SECURITY_REQUIRE_HTTPS`
 - `IAB_SECURITY_REQUIRE_PKCE`
+- `IAB_SECURITY_CONSENT_REQUIRED`
+- `IAB_SECURITY_CLIENT_METADATA_DISCOVERY_ENABLED`
+- `IAB_RATE_LIMIT_ENABLED`
+- `IAB_RATE_LIMIT_REQUESTS_PER_MINUTE`
+- `IAB_RATE_LIMIT_BURST`
 - `IAB_STORAGE_PATH`
 - `IAB_BACKENDS_AUTHENTIK_ISSUER`
 - `IAB_BACKENDS_AUTHENTIK_CLIENT_ID`
@@ -166,6 +180,20 @@ Add IndieAuth discovery links to the HTML for your profile URL:
 <link rel="token_endpoint" href="https://indieauth.example.org/token">
 ```
 
+IndieAuth clients whose callback URL is not the same origin as `client_id` should publish client metadata at their `client_id` URL. The bridge accepts either JSON:
+
+```json
+{
+  "redirect_uris": ["https://client.example/callback"]
+}
+```
+
+or an HTML link:
+
+```html
+<link rel="redirect_uri" href="https://client.example/callback">
+```
+
 Metadata example:
 
 ```json
@@ -173,6 +201,8 @@ Metadata example:
   "issuer": "https://indieauth.example.org",
   "authorization_endpoint": "https://indieauth.example.org/authorize",
   "token_endpoint": "https://indieauth.example.org/token",
+  "introspection_endpoint": "https://indieauth.example.org/introspect",
+  "revocation_endpoint": "https://indieauth.example.org/revoke",
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code"],
   "code_challenge_methods_supported": ["S256"],
@@ -248,6 +278,10 @@ The container workflow builds with Buildah and pushes to GHCR on `main` and `vX.
 
 OCI labels include source, revision, version, and description.
 
+The publishing workflow also generates an SPDX JSON SBOM and publishes GitHub artifact attestations for build provenance and the SBOM.
+
+Dependabot is configured for Go modules with vendoring enabled, plus GitHub Actions updates. Go dependency PRs should include the corresponding `vendor/` changes.
+
 ## Development
 
 Run locally:
@@ -294,10 +328,12 @@ Most OIDC providers should reuse `internal/backends/oidc`. Provider-specific pac
 Primary threats and mitigations:
 
 - Open redirect: redirect URIs are absolute, fragment-free, HTTPS by default, and same-origin with `client_id`.
+- Cross-origin client redirects: when enabled, client metadata discovery fetches `client_id` and accepts only declared `redirect_uris` or `rel=redirect_uri` links.
 - Code interception: PKCE S256 is required by default, codes expire quickly, and codes are one-use.
 - OIDC replay or mix-up: backend state and nonce are stored server-side and checked on callback; ID tokens are verified for issuer, audience, expiry, signature, and nonce by `go-oidc`.
 - Token database disclosure: authorization codes and access tokens are stored as SHA-256 hashes.
 - Profile claim confusion: a backend identity must match explicit configured selectors for the requested `me`.
+- Unwanted approvals: consent is enabled by default so the user sees the client, redirect URI, profile, and requested scope before code issuance.
 
 Operational responsibilities:
 
@@ -308,8 +344,9 @@ Operational responsibilities:
 
 ## Troubleshooting
 
-- `invalid redirect_uri`: ensure the IndieAuth client's `redirect_uri` has the same scheme, host, and port as `client_id`.
+- `invalid redirect_uri`: ensure the IndieAuth client's `redirect_uri` has the same origin as `client_id` or is declared in client metadata.
 - `unknown me URL`: the submitted `me` URL must canonicalize to one of the configured `profiles[].me` values.
 - `invalid or expired state`: the OIDC callback is stale, repeated, or did not originate from this bridge.
 - `identity is not allowed`: the authentik user authenticated correctly but does not match the requested profile mapping.
 - OIDC discovery failures: verify the authentik issuer URL and that the bridge can reach authentik from the container network.
+- Consent page expired: restart the IndieAuth login flow; consent requests share the short authorization-code TTL.

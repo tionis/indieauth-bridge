@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    vendor: true
+    open-pull-requests-limit: 5
+    groups:
+      go-security-and-runtime:
+        patterns:
+          - "github.com/coreos/go-oidc*"
+          - "github.com/go-jose/go-jose*"
+          - "golang.org/x/*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
