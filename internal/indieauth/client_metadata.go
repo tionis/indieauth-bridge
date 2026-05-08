@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -53,9 +54,13 @@ func DiscoverClientRedirectURIs(ctx context.Context, httpClient *http.Client, cl
 	if err != nil {
 		return nil, err
 	}
+	if err := validateMetadataFetchTarget(ctx, clientURL, allowHTTP); err != nil {
+		return nil, err
+	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
+	httpClient = clientWithRedirectGuard(httpClient, allowHTTP)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientURL.String(), nil)
@@ -82,6 +87,52 @@ func DiscoverClientRedirectURIs(ctx context.Context, httpClient *http.Client, cl
 		return resolveRedirectURIs(clientURL, uris), nil
 	}
 	return nil, errors.New("client metadata did not declare redirect_uri")
+}
+
+func clientWithRedirectGuard(base *http.Client, allowPrivate bool) *http.Client {
+	client := *base
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		return validateMetadataFetchTarget(req.Context(), req.URL, allowPrivate)
+	}
+	return &client
+}
+
+func validateMetadataFetchTarget(ctx context.Context, u *url.URL, allowPrivate bool) error {
+	if allowPrivate {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("client metadata host is invalid")
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	if len(ips) == 0 {
+		return errors.New("client metadata host did not resolve")
+	}
+	for _, addr := range ips {
+		if isUnsafeMetadataIP(addr.IP) {
+			return errors.New("client metadata host resolves to a private or local address")
+		}
+	}
+	return nil
+}
+
+func isUnsafeMetadataIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
 }
 
 func redirectURIsFromJSON(body []byte) []string {

@@ -138,3 +138,20 @@ func TestConsentRequestExpiry(t *testing.T) {
 		t.Fatalf("expected expired consent request, got %v", err)
 	}
 }
+
+func TestSchemaMigrationsRecorded(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count < 2 {
+		t.Fatalf("expected migrations to be recorded, got %d", count)
+	}
+}

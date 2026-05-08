@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/eric/indieauth-bridge/internal/backends"
@@ -43,9 +44,21 @@ func (s *SQLite) Close() error {
 }
 
 func (s *SQLite) migrate(ctx context.Context) error {
-	stmts := []string{
+	pragmas := []string{
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA foreign_keys=ON`,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at INTEGER NOT NULL
+		)`,
+	}
+	for _, stmt := range pragmas {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	if err := s.applyMigration(ctx, 1, "initial_schema", []string{
 		`CREATE TABLE IF NOT EXISTS auth_requests (
 			id TEXT PRIMARY KEY,
 			backend TEXT NOT NULL,
@@ -109,41 +122,46 @@ func (s *SQLite) migrate(ctx context.Context) error {
 			client_id TEXT,
 			created_at INTEGER NOT NULL
 		)`,
+	}); err != nil {
+		return err
 	}
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
-	}
-	if err := s.addColumnIfMissing(ctx, "access_tokens", "revoked_at", "INTEGER"); err != nil {
+	if err := s.applyMigration(ctx, 2, "access_token_revocation", []string{
+		`ALTER TABLE access_tokens ADD COLUMN revoked_at INTEGER`,
+	}); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *SQLite) addColumnIfMissing(ctx context.Context, table, column, columnType string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+func (s *SQLite) applyMigration(ctx context.Context, version int, name string, stmts []string) error {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE version = ?`, version).Scan(&exists)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnError(err) {
 			return err
 		}
-		if name == column {
-			return nil
-		}
 	}
-	if err := rows.Err(); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`, version, name, time.Now().Unix()); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+columnType)
-	return err
+	return tx.Commit()
+}
+
+func isDuplicateColumnError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column")
 }
 
 func (s *SQLite) CreateAuthRequest(ctx context.Context, ar AuthRequest) error {

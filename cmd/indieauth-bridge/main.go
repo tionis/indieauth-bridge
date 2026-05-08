@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -20,10 +22,15 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to config file")
-	flag.Parse()
-
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	if len(os.Args) > 1 && os.Args[1] == "check-config" {
+		os.Exit(runCheckConfig(os.Args[2:], logger))
+	}
+
+	configPath := flag.String("config", "", "path to config file")
+	checkConfig := flag.Bool("check-config", false, "validate configuration and exit")
+	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -34,6 +41,10 @@ func main() {
 	}
 	if cfg.Security.DevMode {
 		logger.Warn("dev mode is enabled; HTTP URLs and placeholder secrets may be accepted")
+	}
+	if *checkConfig {
+		writeConfigSummary(cfg)
+		return
 	}
 
 	store, err := storage.OpenSQLite(ctx, cfg.Storage.Path)
@@ -74,6 +85,51 @@ func main() {
 		logger.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+func runCheckConfig(args []string, logger *slog.Logger) int {
+	fs := flag.NewFlagSet("check-config", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", "", "path to config file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		logger.Error("configuration failed", "err", err)
+		return 1
+	}
+	writeConfigSummary(cfg)
+	return 0
+}
+
+func writeConfigSummary(cfg config.Config) {
+	backendNames := make([]string, 0, len(cfg.Backends))
+	for name := range cfg.Backends {
+		backendNames = append(backendNames, name)
+	}
+	sort.Strings(backendNames)
+	summary := map[string]any{
+		"ok":                                true,
+		"listen":                            cfg.Server.Listen,
+		"issuer":                            cfg.Server.Issuer,
+		"public_url":                        cfg.Server.PublicURL,
+		"profile_count":                     len(cfg.Profiles),
+		"backends":                          backendNames,
+		"storage_type":                      cfg.Storage.Type,
+		"require_https":                     cfg.Security.RequireHTTPS,
+		"require_pkce":                      cfg.Security.RequirePKCE,
+		"consent_required":                  cfg.Security.ConsentRequired,
+		"client_metadata_discovery":         cfg.Security.ClientMetadataDiscoveryEnabled,
+		"rate_limit_enabled":                cfg.RateLimit.Enabled,
+		"rate_limit_requests_per_minute":    cfg.RateLimit.RequestsPerMinute,
+		"rate_limit_burst":                  cfg.RateLimit.Burst,
+		"warning_dev_mode":                  cfg.Security.DevMode,
+		"warning_placeholder_cookie_secret": cfg.Security.CookieSecret == "change-me",
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(summary)
 }
 
 func buildBackends(ctx context.Context, cfg config.Config) (map[string]backends.Backend, error) {

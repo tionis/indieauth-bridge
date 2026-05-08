@@ -164,6 +164,14 @@ Recommended selectors:
 - Add `allowed_usernames` or `allowed_emails` only when you understand how those claims are managed in your authentik tenant.
 - Use `allowed_groups` when membership is the administrative control point.
 
+To find the stable authentik subject claim, use authentik's provider test flow or any OIDC token inspection tool to inspect an ID token for the Application. The claim named `sub` is the value to put in `profiles[].allowed_subjects`. A typical workflow is:
+
+1. Finish authentik provider setup with redirect URI `https://indieauth.example.org/auth/callback`.
+2. Start a login from an IndieAuth client or OIDC test client.
+3. Inspect the returned ID token claims.
+4. Copy the exact `sub` value into `allowed_subjects`.
+5. Keep username/email selectors as optional fallback selectors, not the primary authorization binding.
+
 The authentik issuer usually looks like:
 
 ```text
@@ -217,6 +225,10 @@ Caddy:
 
 ```caddyfile
 indieauth.example.org {
+  header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  request_body {
+    max_size 64KB
+  }
   reverse_proxy 127.0.0.1:8080
 }
 ```
@@ -227,15 +239,35 @@ nginx:
 server {
   listen 443 ssl http2;
   server_name indieauth.example.org;
+  client_max_body_size 64k;
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
   location / {
     proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_connect_timeout 5s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 30s;
   }
 }
 ```
+
+If the bridge is behind trusted reverse proxies and you want rate limiting to use the original client IP from `X-Forwarded-For`, configure `server.trusted_proxies` or `rate_limit.trusted_proxies` with the proxy IPs or CIDR ranges. Do not trust forwarded headers from arbitrary clients.
+
+## Backup and Restore
+
+SQLite state lives under the configured `storage.path`, normally `/data/bridge.db` in containers. Back up the database and its WAL sidecar files together:
+
+```sh
+podman stop indieauth-bridge
+cp /srv/indieauth-bridge/data/bridge.db* /backup/indieauth-bridge/
+podman start indieauth-bridge
+```
+
+For hot backups, use SQLite's online backup tooling from the host or a temporary maintenance container instead of copying only `bridge.db` while the service is running. Restore by stopping the service, replacing the database files from the backup, fixing ownership for the container user if needed, and starting the service again.
 
 ## Podman Quadlet
 
@@ -290,6 +322,12 @@ Run locally:
 go run ./cmd/indieauth-bridge -config examples/config.yaml
 ```
 
+Validate configuration without starting the HTTP server:
+
+```sh
+go run ./cmd/indieauth-bridge check-config -config examples/config.yaml
+```
+
 Run checks:
 
 ```sh
@@ -328,7 +366,7 @@ Most OIDC providers should reuse `internal/backends/oidc`. Provider-specific pac
 Primary threats and mitigations:
 
 - Open redirect: redirect URIs are absolute, fragment-free, HTTPS by default, and same-origin with `client_id`.
-- Cross-origin client redirects: when enabled, client metadata discovery fetches `client_id` and accepts only declared `redirect_uris` or `rel=redirect_uri` links.
+- Cross-origin client redirects: when enabled, client metadata discovery fetches `client_id` and accepts only declared `redirect_uris` or `rel=redirect_uri` links. In production mode it refuses metadata URLs that resolve to loopback, private, link-local, multicast, or unspecified IP addresses.
 - Code interception: PKCE S256 is required by default, codes expire quickly, and codes are one-use.
 - OIDC replay or mix-up: backend state and nonce are stored server-side and checked on callback; ID tokens are verified for issuer, audience, expiry, signature, and nonce by `go-oidc`.
 - Token database disclosure: authorization codes and access tokens are stored as SHA-256 hashes.
@@ -339,6 +377,7 @@ Operational responsibilities:
 
 - Put the bridge behind HTTPS.
 - Protect `config.yaml` and SQLite data.
+- Back up `bridge.db` with its WAL sidecar files, or use SQLite online backup tooling.
 - Keep authentik client secrets private.
 - Prefer `allowed_subjects` over mutable user claims.
 
@@ -350,3 +389,4 @@ Operational responsibilities:
 - `identity is not allowed`: the authentik user authenticated correctly but does not match the requested profile mapping.
 - OIDC discovery failures: verify the authentik issuer URL and that the bridge can reach authentik from the container network.
 - Consent page expired: restart the IndieAuth login flow; consent requests share the short authorization-code TTL.
+- Client metadata fetch rejected: the `client_id` host may resolve to a private or local address; this is blocked outside dev mode to reduce SSRF risk.

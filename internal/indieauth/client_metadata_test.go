@@ -2,8 +2,10 @@ package indieauth
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -47,4 +49,35 @@ func TestValidateClientRedirectRejectsUndeclaredMetadata(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected undeclared redirect to be rejected")
 	}
+}
+
+func TestValidateMetadataFetchTargetBlocksPrivateAddresses(t *testing.T) {
+	u := mustParseURL(t, "https://127.0.0.1/client")
+	if err := validateMetadataFetchTarget(context.Background(), u, false); err == nil {
+		t.Fatal("expected private metadata target to be blocked")
+	}
+	if err := validateMetadataFetchTarget(context.Background(), u, true); err != nil {
+		t.Fatalf("dev/private metadata target should be allowed when requested: %v", err)
+	}
+}
+
+func TestUnsafeMetadataIP(t *testing.T) {
+	if !isUnsafeMetadataIP(net.ParseIP("10.0.0.1")) {
+		t.Fatal("private IP should be unsafe")
+	}
+	if !isUnsafeMetadataIP(net.ParseIP("169.254.169.254")) {
+		t.Fatal("link-local IP should be unsafe")
+	}
+	if isUnsafeMetadataIP(net.ParseIP("203.0.113.1")) {
+		t.Fatal("documentation public IP should not be treated as unsafe")
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
