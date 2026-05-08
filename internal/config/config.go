@@ -33,11 +33,12 @@ func (d Duration) MarshalYAML() (any, error) {
 }
 
 type Config struct {
-	Server   ServerConfig             `yaml:"server"`
-	Security SecurityConfig           `yaml:"security"`
-	Profiles []ProfileConfig          `yaml:"profiles"`
-	Backends map[string]BackendConfig `yaml:"backends"`
-	Storage  StorageConfig            `yaml:"storage"`
+	Server    ServerConfig             `yaml:"server"`
+	Security  SecurityConfig           `yaml:"security"`
+	RateLimit RateLimitConfig          `yaml:"rate_limit"`
+	Profiles  []ProfileConfig          `yaml:"profiles"`
+	Backends  map[string]BackendConfig `yaml:"backends"`
+	Storage   StorageConfig            `yaml:"storage"`
 }
 
 type ServerConfig struct {
@@ -48,13 +49,22 @@ type ServerConfig struct {
 }
 
 type SecurityConfig struct {
-	CookieSecret   string   `yaml:"cookie_secret"`
-	CodeTTL        Duration `yaml:"code_ttl"`
-	AuthRequestTTL Duration `yaml:"auth_request_ttl"`
-	AccessTokenTTL Duration `yaml:"access_token_ttl"`
-	RequireHTTPS   bool     `yaml:"require_https"`
-	RequirePKCE    bool     `yaml:"require_pkce"`
-	DevMode        bool     `yaml:"dev_mode"`
+	CookieSecret                   string   `yaml:"cookie_secret"`
+	CodeTTL                        Duration `yaml:"code_ttl"`
+	AuthRequestTTL                 Duration `yaml:"auth_request_ttl"`
+	AccessTokenTTL                 Duration `yaml:"access_token_ttl"`
+	RequireHTTPS                   bool     `yaml:"require_https"`
+	RequirePKCE                    bool     `yaml:"require_pkce"`
+	ConsentRequired                bool     `yaml:"consent_required"`
+	ClientMetadataDiscoveryEnabled bool     `yaml:"client_metadata_discovery_enabled"`
+	DevMode                        bool     `yaml:"dev_mode"`
+}
+
+type RateLimitConfig struct {
+	Enabled           bool     `yaml:"enabled"`
+	RequestsPerMinute int      `yaml:"requests_per_minute"`
+	Burst             int      `yaml:"burst"`
+	TrustedProxies    []string `yaml:"trusted_proxies"`
 }
 
 type ProfileConfig struct {
@@ -89,11 +99,18 @@ func Default() Config {
 			Listen: ":8080",
 		},
 		Security: SecurityConfig{
-			CodeTTL:        Duration{Duration: 5 * time.Minute},
-			AuthRequestTTL: Duration{Duration: 10 * time.Minute},
-			AccessTokenTTL: Duration{Duration: 24 * time.Hour},
-			RequireHTTPS:   true,
-			RequirePKCE:    true,
+			CodeTTL:                        Duration{Duration: 5 * time.Minute},
+			AuthRequestTTL:                 Duration{Duration: 10 * time.Minute},
+			AccessTokenTTL:                 Duration{Duration: 24 * time.Hour},
+			RequireHTTPS:                   true,
+			RequirePKCE:                    true,
+			ConsentRequired:                true,
+			ClientMetadataDiscoveryEnabled: true,
+		},
+		RateLimit: RateLimitConfig{
+			Enabled:           true,
+			RequestsPerMinute: 60,
+			Burst:             20,
 		},
 		Backends: map[string]BackendConfig{},
 		Storage: StorageConfig{
@@ -144,6 +161,25 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("IAB_SECURITY_REQUIRE_PKCE"); v != "" {
 		cfg.Security.RequirePKCE = parseBool(v)
 	}
+	if v := os.Getenv("IAB_SECURITY_CONSENT_REQUIRED"); v != "" {
+		cfg.Security.ConsentRequired = parseBool(v)
+	}
+	if v := os.Getenv("IAB_SECURITY_CLIENT_METADATA_DISCOVERY_ENABLED"); v != "" {
+		cfg.Security.ClientMetadataDiscoveryEnabled = parseBool(v)
+	}
+	if v := os.Getenv("IAB_RATE_LIMIT_ENABLED"); v != "" {
+		cfg.RateLimit.Enabled = parseBool(v)
+	}
+	if v := os.Getenv("IAB_RATE_LIMIT_REQUESTS_PER_MINUTE"); v != "" {
+		if parsed, err := parsePositiveInt(v); err == nil {
+			cfg.RateLimit.RequestsPerMinute = parsed
+		}
+	}
+	if v := os.Getenv("IAB_RATE_LIMIT_BURST"); v != "" {
+		if parsed, err := parsePositiveInt(v); err == nil {
+			cfg.RateLimit.Burst = parsed
+		}
+	}
 	if cfg.Backends == nil {
 		cfg.Backends = map[string]BackendConfig{}
 	}
@@ -158,6 +194,17 @@ func applyEnv(cfg *Config) {
 	if b.Type != "" || b.Issuer != "" || b.ClientID != "" || b.ClientSecret != "" || b.RedirectURI != "" {
 		cfg.Backends["authentik"] = b
 	}
+}
+
+func parsePositiveInt(v string) (int, error) {
+	var out int
+	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &out); err != nil {
+		return 0, err
+	}
+	if out <= 0 {
+		return 0, errors.New("value must be positive")
+	}
+	return out, nil
 }
 
 func parseBool(v string) bool {
@@ -196,6 +243,12 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Security.CodeTTL.Duration <= 0 || cfg.Security.AuthRequestTTL.Duration <= 0 || cfg.Security.AccessTokenTTL.Duration <= 0 {
 		return errors.New("security TTL values must be positive")
+	}
+	if cfg.RateLimit.RequestsPerMinute <= 0 {
+		cfg.RateLimit.RequestsPerMinute = 60
+	}
+	if cfg.RateLimit.Burst <= 0 {
+		cfg.RateLimit.Burst = 20
 	}
 	if len(cfg.Profiles) == 0 {
 		return errors.New("at least one profile is required")

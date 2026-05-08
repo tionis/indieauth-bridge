@@ -132,13 +132,117 @@ func TestAuthorizeCallbackAndTokenFlow(t *testing.T) {
 	if tokenBody["me"] != "https://eric.example/" || tokenBody["token_type"] != "Bearer" || tokenBody["access_token"] == "" {
 		t.Fatalf("unexpected token response: %#v", tokenBody)
 	}
+	accessToken := tokenBody["access_token"].(string)
+
+	form = url.Values{"token": {accessToken}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/introspect", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("introspect status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var introspectBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &introspectBody); err != nil {
+		t.Fatal(err)
+	}
+	if introspectBody["active"] != true || introspectBody["me"] != "https://eric.example/" {
+		t.Fatalf("unexpected introspection response: %#v", introspectBody)
+	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req = httptest.NewRequest(http.MethodPost, "/revoke", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/introspect", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-revoke introspect status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &introspectBody); err != nil {
+		t.Fatal(err)
+	}
+	if introspectBody["active"] != false {
+		t.Fatalf("expected inactive token after revoke: %#v", introspectBody)
+	}
+
+	rec = httptest.NewRecorder()
+	reuseForm := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"client_id":     {"http://client.example/app"},
+		"redirect_uri":  {"http://client.example/callback"},
+		"code_verifier": {verifier},
+	}
+	req = httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(reuseForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("reused code status = %d", rec.Code)
+	}
+}
+
+func TestConsentApprovalFlow(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Security.ConsentRequired = true
+	handler := app.Routes()
+	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	challenge := pkceChallenge(verifier)
+
+	authURL := "/authorize?response_type=code&me=https%3A%2F%2Feric.example%2F&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&state=client-state&scope=profile&code_challenge=" + url.QueryEscape(challenge) + "&code_challenge_method=S256"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	consentURL, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consentID := consentURL.Query().Get("id")
+	if consentID == "" || consentURL.Path != "/consent" {
+		t.Fatalf("unexpected consent redirect: %s", consentURL.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/consent?id="+url.QueryEscape(consentID), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consent page status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	cr, err := app.store.GetConsentRequest(context.Background(), consentID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"id":       {consentID},
+		"csrf":     {cr.CSRFToken},
+		"decision": {"approve"},
+	}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/consent", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("consent post status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	callback, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callback.Host != "client.example" || callback.Query().Get("code") == "" || callback.Query().Get("state") != "client-state" {
+		t.Fatalf("unexpected final redirect: %s", callback.String())
 	}
 }
 
@@ -193,6 +297,9 @@ func newTestServer(t *testing.T) *Server {
 	cfg.Server.Issuer = "http://bridge.example"
 	cfg.Security.CookieSecret = "change-me"
 	cfg.Security.DevMode = true
+	cfg.Security.ConsentRequired = false
+	cfg.Security.ClientMetadataDiscoveryEnabled = false
+	cfg.RateLimit.Enabled = false
 	cfg.Profiles = []config.ProfileConfig{{
 		Me:              "https://eric.example/",
 		DisplayName:     "Eric",

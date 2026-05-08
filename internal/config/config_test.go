@@ -37,6 +37,8 @@ storage:
 	}
 	t.Setenv("IAB_SERVER_LISTEN", ":9090")
 	t.Setenv("IAB_BACKENDS_AUTHENTIK_CLIENT_ID", "override")
+	t.Setenv("IAB_SECURITY_CONSENT_REQUIRED", "false")
+	t.Setenv("IAB_RATE_LIMIT_BURST", "7")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +48,12 @@ storage:
 	}
 	if cfg.Backends["authentik"].ClientID != "override" {
 		t.Fatalf("backend override not applied")
+	}
+	if cfg.Security.ConsentRequired {
+		t.Fatalf("consent override not applied")
+	}
+	if cfg.RateLimit.Burst != 7 {
+		t.Fatalf("rate limit override not applied")
 	}
 	if cfg.Security.CodeTTL.Duration != 5*time.Minute {
 		t.Fatalf("default code ttl changed: %s", cfg.Security.CodeTTL)

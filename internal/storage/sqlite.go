@@ -83,6 +83,22 @@ func (s *SQLite) migrate(ctx context.Context) error {
 			scope TEXT NOT NULL,
 			profile_json BLOB,
 			expires_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER
+		)`,
+		`CREATE TABLE IF NOT EXISTS consent_requests (
+			id TEXT PRIMARY KEY,
+			csrf_token TEXT NOT NULL,
+			me TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			redirect_uri TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			client_state TEXT NOT NULL,
+			code_challenge TEXT NOT NULL,
+			code_challenge_method TEXT NOT NULL,
+			profile_json BLOB,
+			subject TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS audit_events (
@@ -99,7 +115,35 @@ func (s *SQLite) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.addColumnIfMissing(ctx, "access_tokens", "revoked_at", "INTEGER"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *SQLite) addColumnIfMissing(ctx context.Context, table, column, columnType string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+columnType)
+	return err
 }
 
 func (s *SQLite) CreateAuthRequest(ctx context.Context, ar AuthRequest) error {
@@ -206,9 +250,88 @@ func (s *SQLite) ConsumeAuthorizationCode(ctx context.Context, code string, now 
 func (s *SQLite) CreateAccessToken(ctx context.Context, token string, rec AccessToken) error {
 	rec.TokenHash = security.HashToken(token)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO access_tokens
-		(token_hash, me, client_id, scope, profile_json, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		(token_hash, me, client_id, scope, profile_json, expires_at, created_at, revoked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
 		rec.TokenHash, rec.Me, rec.ClientID, rec.Scope, rec.ProfileJSON, rec.ExpiresAt.Unix(), rec.CreatedAt.Unix())
+	return err
+}
+
+func (s *SQLite) GetAccessToken(ctx context.Context, token string, now time.Time) (AccessToken, error) {
+	hash := security.HashToken(token)
+	row := s.db.QueryRowContext(ctx, `SELECT token_hash, me, client_id, scope, profile_json, expires_at, created_at, revoked_at
+		FROM access_tokens WHERE token_hash = ?`, hash)
+	var rec AccessToken
+	var expiresAt, createdAt int64
+	var revokedAt sql.NullInt64
+	err := row.Scan(&rec.TokenHash, &rec.Me, &rec.ClientID, &rec.Scope, &rec.ProfileJSON, &expiresAt, &createdAt, &revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AccessToken{}, ErrNotFound
+	}
+	if err != nil {
+		return AccessToken{}, err
+	}
+	rec.ExpiresAt = time.Unix(expiresAt, 0)
+	rec.CreatedAt = time.Unix(createdAt, 0)
+	if revokedAt.Valid {
+		t := time.Unix(revokedAt.Int64, 0)
+		rec.RevokedAt = &t
+		return AccessToken{}, ErrRevoked
+	}
+	if !now.Before(rec.ExpiresAt) {
+		return AccessToken{}, ErrExpired
+	}
+	return rec, nil
+}
+
+func (s *SQLite) RevokeAccessToken(ctx context.Context, token string, now time.Time) error {
+	hash := security.HashToken(token)
+	_, err := s.db.ExecContext(ctx, `UPDATE access_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`, now.Unix(), hash)
+	return err
+}
+
+func (s *SQLite) CreateConsentRequest(ctx context.Context, cr ConsentRequest) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO consent_requests
+		(id, csrf_token, me, client_id, redirect_uri, scope, client_state, code_challenge, code_challenge_method, profile_json, subject, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		cr.ID, cr.CSRFToken, cr.Me, cr.ClientID, cr.RedirectURI, cr.Scope, cr.ClientState, cr.CodeChallenge,
+		cr.CodeChallengeMethod, cr.ProfileJSON, cr.Subject, cr.ExpiresAt.Unix(), cr.CreatedAt.Unix())
+	return err
+}
+
+func (s *SQLite) GetConsentRequest(ctx context.Context, id string, now time.Time) (ConsentRequest, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, csrf_token, me, client_id, redirect_uri, scope, client_state,
+		code_challenge, code_challenge_method, profile_json, subject, expires_at, created_at
+		FROM consent_requests WHERE id = ?`, id)
+	var cr ConsentRequest
+	var expiresAt, createdAt int64
+	err := row.Scan(&cr.ID, &cr.CSRFToken, &cr.Me, &cr.ClientID, &cr.RedirectURI, &cr.Scope, &cr.ClientState,
+		&cr.CodeChallenge, &cr.CodeChallengeMethod, &cr.ProfileJSON, &cr.Subject, &expiresAt, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConsentRequest{}, ErrNotFound
+	}
+	if err != nil {
+		return ConsentRequest{}, err
+	}
+	cr.ExpiresAt = time.Unix(expiresAt, 0)
+	cr.CreatedAt = time.Unix(createdAt, 0)
+	if !now.Before(cr.ExpiresAt) {
+		return ConsentRequest{}, ErrExpired
+	}
+	return cr, nil
+}
+
+func (s *SQLite) DeleteConsentRequest(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM consent_requests WHERE id = ?`, id)
+	return err
+}
+
+func (s *SQLite) CreateAuditEvent(ctx context.Context, event AuditEvent) error {
+	createdAt := event.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_events (event_type, subject, me, client_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+		event.EventType, event.Subject, event.Me, event.ClientID, createdAt.Unix())
 	return err
 }
 
@@ -216,6 +339,7 @@ func (s *SQLite) Cleanup(ctx context.Context, now time.Time) error {
 	cutoff := now.Unix()
 	for _, stmt := range []string{
 		`DELETE FROM auth_requests WHERE expires_at <= ?`,
+		`DELETE FROM consent_requests WHERE expires_at <= ?`,
 		`DELETE FROM authorization_codes WHERE expires_at <= ? OR used_at IS NOT NULL`,
 		`DELETE FROM access_tokens WHERE expires_at <= ?`,
 	} {

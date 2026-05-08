@@ -73,3 +73,68 @@ func TestAuthRequestByBackendState(t *testing.T) {
 		t.Fatalf("unexpected request: %+v", got)
 	}
 }
+
+func TestAccessTokenLookupAndRevoke(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now()
+	token := "access-token"
+	if err := store.CreateAccessToken(ctx, token, AccessToken{
+		Me:        "https://eric.example/",
+		ClientID:  "https://client.example/",
+		Scope:     "profile",
+		ExpiresAt: now.Add(time.Hour),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAccessToken(ctx, token, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Me != "https://eric.example/" || got.TokenHash == token {
+		t.Fatalf("unexpected token record: %+v", got)
+	}
+	if err := store.RevokeAccessToken(ctx, token, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetAccessToken(ctx, token, now); err != ErrRevoked {
+		t.Fatalf("expected revoked token, got %v", err)
+	}
+}
+
+func TestConsentRequestExpiry(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now()
+	if err := store.CreateConsentRequest(ctx, ConsentRequest{
+		ID:          "consent",
+		CSRFToken:   "csrf",
+		Me:          "https://eric.example/",
+		ClientID:    "https://client.example/",
+		RedirectURI: "https://client.example/callback",
+		Subject:     "sub",
+		ExpiresAt:   now.Add(time.Minute),
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetConsentRequest(ctx, "consent", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CSRFToken != "csrf" {
+		t.Fatalf("unexpected consent request: %+v", got)
+	}
+	if _, err := store.GetConsentRequest(ctx, "consent", now.Add(2*time.Minute)); err != ErrExpired {
+		t.Fatalf("expected expired consent request, got %v", err)
+	}
+}
