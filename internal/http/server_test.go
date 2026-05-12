@@ -260,7 +260,6 @@ func TestConsentApprovalFlow(t *testing.T) {
 
 func TestLegacyIndieAuthAuthorizeAndProfileExchange(t *testing.T) {
 	app := newTestServer(t)
-	app.cfg.Security.RequirePKCE = false
 	handler := app.Routes()
 
 	authURL := "/authorize?me=https%3A%2F%2Feric.example%2F&scope&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&state=client-state"
@@ -302,6 +301,42 @@ func TestLegacyIndieAuthAuthorizeAndProfileExchange(t *testing.T) {
 	}
 	if body["me"] != "https://eric.example/" || body["access_token"] != nil {
 		t.Fatalf("unexpected profile exchange response: %#v", body)
+	}
+}
+
+func TestLegacyIndieAuthCodeCannotUseTokenEndpointWhenPKCERequired(t *testing.T) {
+	app := newTestServer(t)
+	handler := app.Routes()
+
+	authURL := "/authorize?me=https%3A%2F%2Feric.example%2F&scope&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&state=client-state"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	callback, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {callback.Query().Get("code")},
+		"client_id":    {"http://client.example/app"},
+		"redirect_uri": {"http://client.example/callback"},
+	}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("token status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

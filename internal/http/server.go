@@ -403,7 +403,8 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	challenge := q.Get("code_challenge")
 	challengeMethod := q.Get("code_challenge_method")
-	if s.cfg.Security.RequirePKCE {
+	legacySignIn := legacyIndieAuthSignIn(q)
+	if s.cfg.Security.RequirePKCE && !legacySignIn {
 		if err := security.ValidateCodeChallenge(challenge, challengeMethod); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -592,6 +593,10 @@ func (s *Server) issueCodeAndRedirect(w http.ResponseWriter, r *http.Request, re
 	return nil
 }
 
+func legacyIndieAuthSignIn(q url.Values) bool {
+	return q.Get("response_type") == "" && q.Get("scope") == "" && q.Get("code_challenge") == "" && q.Get("code_challenge_method") == ""
+}
+
 func (s *Server) handleConsentGet(w http.ResponseWriter, r *http.Request) {
 	consentID := r.URL.Query().Get("id")
 	cr, err := s.store.GetConsentRequest(r.Context(), consentID, s.now())
@@ -722,6 +727,11 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if rec.ClientID != r.Form.Get("client_id") || rec.RedirectURI != r.Form.Get("redirect_uri") {
 		s.audit(r.Context(), "token_exchange_rejected", "", rec.Me, r.Form.Get("client_id"))
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id or redirect_uri mismatch")
+		return
+	}
+	if s.cfg.Security.RequirePKCE && rec.CodeChallenge == "" {
+		s.audit(r.Context(), "token_exchange_rejected", "", rec.Me, rec.ClientID)
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		return
 	}
 	if rec.CodeChallenge != "" {
