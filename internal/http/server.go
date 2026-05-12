@@ -621,7 +621,11 @@ func (s *Server) handleConsentGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Content-Security-Policy", consentContentSecurityPolicy(scriptNonce, s.cfg.Server.PublicURL+"/consent"))
+	w.Header().Set("Content-Security-Policy", consentContentSecurityPolicy(
+		scriptNonce,
+		cspOriginSource(s.cfg.Server.PublicURL),
+		cspOriginSource(cr.RedirectURI),
+	))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := consentTemplate.Execute(w, data); err != nil {
@@ -676,8 +680,22 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func consentContentSecurityPolicy(scriptNonce, formAction string) string {
-	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "'; base-uri 'none'; form-action 'self' " + formAction + "; frame-ancestors 'none'"
+func consentContentSecurityPolicy(scriptNonce string, formActions ...string) string {
+	sources := []string{"'self'"}
+	for _, source := range formActions {
+		if source != "" && source != "'self'" {
+			sources = append(sources, source)
+		}
+	}
+	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "'; base-uri 'none'; form-action " + strings.Join(sources, " ") + "; frame-ancestors 'none'"
+}
+
+func cspOriginSource(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func (s *Server) findAuthRequest(ctx context.Context, requestedBackend, state string) (storage.AuthRequest, backends.Backend, error) {

@@ -231,8 +231,8 @@ func TestConsentApprovalFlow(t *testing.T) {
 	if !strings.Contains(csp, "script-src 'nonce-") {
 		t.Fatalf("consent page CSP should allow only the nonce script, got %q", csp)
 	}
-	if !strings.Contains(csp, "form-action 'self' http://bridge.example/consent") {
-		t.Fatalf("consent page CSP should allow the public consent action, got %q", csp)
+	if !strings.Contains(csp, "form-action 'self' http://bridge.example http://client.example") {
+		t.Fatalf("consent page CSP should allow the consent and client redirect origins, got %q", csp)
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, `action="http://bridge.example/consent?id=`+consentID+`"`) {
