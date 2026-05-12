@@ -227,12 +227,16 @@ func TestConsentApprovalFlow(t *testing.T) {
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("unexpected consent cache-control: %s", rec.Header().Get("Cache-Control"))
 	}
-	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'nonce-") {
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'nonce-") {
 		t.Fatalf("consent page CSP should allow only the nonce script, got %q", csp)
 	}
+	if !strings.Contains(csp, "form-action 'self' http://bridge.example/consent") {
+		t.Fatalf("consent page CSP should allow the public consent action, got %q", csp)
+	}
 	body := rec.Body.String()
-	if strings.Contains(body, `action="/consent"`) {
-		t.Fatal("consent form should submit to the current URL")
+	if !strings.Contains(body, `action="http://bridge.example/consent?id=`+consentID+`"`) {
+		t.Fatal("consent form should submit to the public consent URL")
 	}
 	if !strings.Contains(body, "button.disabled = true") {
 		t.Fatal("consent form should disable submit buttons after submit")

@@ -252,7 +252,7 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
       <div><dt>Redirect</dt><dd>{{.RedirectURI}}</dd></div>
       <div><dt>Scope</dt><dd>{{.Scope}}</dd></div>
     </dl>
-    <form method="post">
+    <form method="post" action="{{.FormAction}}">
       <input type="hidden" name="id" value="{{.ID}}">
       <input type="hidden" name="csrf" value="{{.CSRFToken}}">
       <button type="submit" name="decision" value="approve">Approve</button>
@@ -617,10 +617,11 @@ func (s *Server) handleConsentGet(w http.ResponseWriter, r *http.Request) {
 		"RedirectURI": cr.RedirectURI,
 		"Scope":       displayScope(cr.Scope),
 		"ScriptNonce": scriptNonce,
+		"FormAction":  s.cfg.Server.PublicURL + "/consent?id=" + url.QueryEscape(cr.ID),
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Content-Security-Policy", consentContentSecurityPolicy(scriptNonce))
+	w.Header().Set("Content-Security-Policy", consentContentSecurityPolicy(scriptNonce, s.cfg.Server.PublicURL+"/consent"))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := consentTemplate.Execute(w, data); err != nil {
@@ -675,8 +676,8 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func consentContentSecurityPolicy(scriptNonce string) string {
-	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+func consentContentSecurityPolicy(scriptNonce, formAction string) string {
+	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "'; base-uri 'none'; form-action 'self' " + formAction + "; frame-ancestors 'none'"
 }
 
 func (s *Server) findAuthRequest(ctx context.Context, requestedBackend, state string) (storage.AuthRequest, backends.Backend, error) {
