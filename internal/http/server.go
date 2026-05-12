@@ -226,7 +226,21 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
     form { display: flex; flex-wrap: wrap; gap: 10px; }
     button { min-height: 42px; padding: 9px 14px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: white; font: inherit; font-weight: 700; cursor: pointer; }
     button.secondary { border-color: var(--danger); background: transparent; color: var(--danger); }
+    button:disabled { opacity: .68; cursor: wait; }
   </style>
+  <script nonce="{{.ScriptNonce}}">
+    addEventListener("DOMContentLoaded", () => {
+      const form = document.querySelector("form");
+      if (!form) return;
+      form.addEventListener("submit", () => {
+        setTimeout(() => {
+          for (const button of form.querySelectorAll("button")) {
+            button.disabled = true;
+          }
+        }, 0);
+      });
+    });
+  </script>
 </head>
 <body>
   <main>
@@ -582,6 +596,11 @@ func (s *Server) handleConsentGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired consent request", http.StatusBadRequest)
 		return
 	}
+	scriptNonce, err := security.RandomToken()
+	if err != nil {
+		http.Error(w, "consent page creation failed", http.StatusInternalServerError)
+		return
+	}
 	data := map[string]any{
 		"ID":          cr.ID,
 		"CSRFToken":   cr.CSRFToken,
@@ -589,7 +608,11 @@ func (s *Server) handleConsentGet(w http.ResponseWriter, r *http.Request) {
 		"ClientID":    cr.ClientID,
 		"RedirectURI": cr.RedirectURI,
 		"Scope":       displayScope(cr.Scope),
+		"ScriptNonce": scriptNonce,
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Security-Policy", consentContentSecurityPolicy(scriptNonce))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := consentTemplate.Execute(w, data); err != nil {
@@ -598,6 +621,8 @@ func (s *Server) handleConsentGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form body", http.StatusBadRequest)
 		return
@@ -640,6 +665,10 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("issue authorization code failed", "err", err)
 		http.Error(w, "code creation failed", http.StatusInternalServerError)
 	}
+}
+
+func consentContentSecurityPolicy(scriptNonce string) string {
+	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 }
 
 func (s *Server) findAuthRequest(ctx context.Context, requestedBackend, state string) (storage.AuthRequest, backends.Backend, error) {
