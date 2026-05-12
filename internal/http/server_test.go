@@ -221,17 +221,17 @@ func TestConsentApprovalFlow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("consent page status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	cr, err := app.store.GetConsentRequest(context.Background(), consentID, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	body := rec.Body.String()
+	if strings.Contains(body, `action="/consent"`) {
+		t.Fatal("consent form should submit to the current URL")
 	}
+	csrfToken := hiddenInputValue(t, body, "csrf")
 	form := url.Values{
-		"id":       {consentID},
-		"csrf":     {cr.CSRFToken},
+		"csrf":     {csrfToken},
 		"decision": {"approve"},
 	}
 	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/consent", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest(http.MethodPost, "/consent?id="+url.QueryEscape(consentID), strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound {
@@ -243,6 +243,29 @@ func TestConsentApprovalFlow(t *testing.T) {
 	}
 	if callback.Host != "client.example" || callback.Query().Get("code") == "" || callback.Query().Get("state") != "client-state" {
 		t.Fatalf("unexpected final redirect: %s", callback.String())
+	}
+}
+
+func TestConsentInvalidCSRFDoesNotConsumeRequest(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Security.ConsentRequired = true
+	handler := app.Routes()
+	consentID := createConsentRequest(t, app)
+
+	form := url.Values{
+		"id":       {consentID},
+		"csrf":     {"wrong"},
+		"decision": {"approve"},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/consent", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid csrf status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := app.store.GetConsentRequest(context.Background(), consentID, time.Now()); err != nil {
+		t.Fatalf("consent request should remain after invalid csrf: %v", err)
 	}
 }
 
@@ -321,6 +344,42 @@ func newTestServer(t *testing.T) *Server {
 	app := NewServer(cfg, store, map[string]backends.Backend{"authentik": fakeBackend{state: "oidc-state"}}, slog.New(slog.NewTextHandler(testWriter{t}, nil)))
 	app.now = time.Now
 	return app
+}
+
+func createConsentRequest(t *testing.T, app *Server) string {
+	t.Helper()
+	now := time.Now()
+	consentID := "consent-id"
+	if err := app.store.CreateConsentRequest(context.Background(), storage.ConsentRequest{
+		ID:          consentID,
+		CSRFToken:   "csrf-token",
+		Me:          "https://eric.example/",
+		ClientID:    "http://client.example/app",
+		RedirectURI: "http://client.example/callback",
+		Scope:       "profile",
+		ClientState: "client-state",
+		Subject:     "auth-sub",
+		ExpiresAt:   now.Add(time.Minute),
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return consentID
+}
+
+func hiddenInputValue(t *testing.T, body, name string) string {
+	t.Helper()
+	needle := `name="` + name + `" value="`
+	start := strings.Index(body, needle)
+	if start == -1 {
+		t.Fatalf("hidden input %q not found in body", name)
+	}
+	start += len(needle)
+	end := strings.Index(body[start:], `"`)
+	if end == -1 {
+		t.Fatalf("hidden input %q value is unterminated", name)
+	}
+	return body[start : start+end]
 }
 
 type testWriter struct {

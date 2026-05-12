@@ -238,7 +238,7 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
       <div><dt>Redirect</dt><dd>{{.RedirectURI}}</dd></div>
       <div><dt>Scope</dt><dd>{{.Scope}}</dd></div>
     </dl>
-    <form method="post" action="/consent">
+    <form method="post">
       <input type="hidden" name="id" value="{{.ID}}">
       <input type="hidden" name="csrf" value="{{.CSRFToken}}">
       <button type="submit" name="decision" value="approve">Approve</button>
@@ -602,9 +602,18 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form body", http.StatusBadRequest)
 		return
 	}
-	cr, err := s.store.GetConsentRequest(r.Context(), r.Form.Get("id"), s.now())
+	consentID := r.Form.Get("id")
+	if consentID == "" {
+		consentID = r.URL.Query().Get("id")
+	}
+	cr, err := s.store.GetConsentRequest(r.Context(), consentID, s.now())
 	if err != nil {
 		http.Error(w, "invalid or expired consent request", http.StatusBadRequest)
+		return
+	}
+	if !security.ConstantTimeEqual(r.Form.Get("csrf"), cr.CSRFToken) {
+		s.audit(r.Context(), "consent_rejected", cr.Subject, cr.Me, cr.ClientID)
+		http.Error(w, "invalid consent token", http.StatusBadRequest)
 		return
 	}
 	defer func() {
@@ -612,11 +621,6 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("delete consent request failed", "err", err)
 		}
 	}()
-	if !security.ConstantTimeEqual(r.Form.Get("csrf"), cr.CSRFToken) {
-		s.audit(r.Context(), "consent_rejected", cr.Subject, cr.Me, cr.ClientID)
-		http.Error(w, "invalid consent token", http.StatusBadRequest)
-		return
-	}
 	if r.Form.Get("decision") != "approve" {
 		s.audit(r.Context(), "consent_denied", cr.Subject, cr.Me, cr.ClientID)
 		s.redirectWithError(w, r, cr.RedirectURI, cr.ClientState, "access_denied")
