@@ -47,6 +47,9 @@ func TestMetadata(t *testing.T) {
 	if body["issuer"] != "http://bridge.example" {
 		t.Fatalf("unexpected issuer: %v", body["issuer"])
 	}
+	if body["authorization_response_iss_parameter_supported"] != true {
+		t.Fatalf("metadata should advertise iss authorization responses: %v", body["authorization_response_iss_parameter_supported"])
+	}
 }
 
 func TestIndexLandingPage(t *testing.T) {
@@ -103,7 +106,7 @@ func TestAuthorizeCallbackAndTokenFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if callback.Scheme != "http" || callback.Host != "client.example" || callback.Query().Get("state") != "client-state" {
+	if callback.Scheme != "http" || callback.Host != "client.example" || callback.Query().Get("state") != "client-state" || callback.Query().Get("iss") != "http://bridge.example" {
 		t.Fatalf("unexpected client redirect: %s", callback.String())
 	}
 	code := callback.Query().Get("code")
@@ -250,8 +253,55 @@ func TestConsentApprovalFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if callback.Host != "client.example" || callback.Query().Get("code") == "" || callback.Query().Get("state") != "client-state" {
+	if callback.Host != "client.example" || callback.Query().Get("code") == "" || callback.Query().Get("state") != "client-state" || callback.Query().Get("iss") != "http://bridge.example" {
 		t.Fatalf("unexpected final redirect: %s", callback.String())
+	}
+}
+
+func TestLegacyIndieAuthAuthorizeAndProfileExchange(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Security.RequirePKCE = false
+	handler := app.Routes()
+
+	authURL := "/authorize?me=https%3A%2F%2Feric.example%2F&scope&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&state=client-state"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	callback, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := callback.Query().Get("code")
+	if code == "" || callback.Query().Get("state") != "client-state" || callback.Query().Get("iss") != "http://bridge.example" {
+		t.Fatalf("unexpected final redirect: %s", callback.String())
+	}
+
+	form := url.Values{
+		"code":         {code},
+		"client_id":    {"http://client.example/app"},
+		"redirect_uri": {"http://client.example/callback"},
+	}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("profile exchange status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["me"] != "https://eric.example/" || body["access_token"] != nil {
+		t.Fatalf("unexpected profile exchange response: %#v", body)
 	}
 }
 

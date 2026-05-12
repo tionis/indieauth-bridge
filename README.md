@@ -389,4 +389,5 @@ Operational responsibilities:
 - `identity is not allowed`: the authentik user authenticated correctly but does not match the requested profile mapping.
 - OIDC discovery failures: verify the authentik issuer URL and that the bridge can reach authentik from the container network.
 - Consent page expired: restart the IndieAuth login flow; consent requests share the short authorization-code TTL.
+- indieauth.com login compatibility: indieauth.com uses an older Web Sign-In flow without PKCE, so set `security.require_pkce: false` if you need to accept requests forwarded by indieauth.com.
 - Client metadata fetch rejected: the `client_id` host may resolve to a private or local address; this is blocked outside dev mode to reduce SSRF risk.

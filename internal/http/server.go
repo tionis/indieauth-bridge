@@ -283,6 +283,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleMetadata)
 	mux.HandleFunc("GET /authorize", s.handleAuthorize)
+	mux.HandleFunc("POST /authorize", s.handleAuthorizationCodeProfile)
 	mux.HandleFunc("GET /auth/callback", s.handleCallback)
 	mux.HandleFunc("GET /callback/{backend}", s.handleCallback)
 	mux.HandleFunc("GET /consent", s.handleConsentGet)
@@ -356,22 +357,23 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer":                                s.cfg.Server.Issuer,
-		"authorization_endpoint":                s.cfg.Server.PublicURL + "/authorize",
-		"token_endpoint":                        s.cfg.Server.PublicURL + "/token",
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		"scopes_supported":                      indieauth.SupportedScopes,
-		"token_endpoint_auth_methods_supported": []string{"none"},
-		"introspection_endpoint":                s.cfg.Server.PublicURL + "/introspect",
-		"revocation_endpoint":                   s.cfg.Server.PublicURL + "/revoke",
+		"issuer":                                         s.cfg.Server.Issuer,
+		"authorization_endpoint":                         s.cfg.Server.PublicURL + "/authorize",
+		"token_endpoint":                                 s.cfg.Server.PublicURL + "/token",
+		"response_types_supported":                       []string{"code"},
+		"grant_types_supported":                          []string{"authorization_code"},
+		"code_challenge_methods_supported":               []string{"S256"},
+		"authorization_response_iss_parameter_supported": true,
+		"scopes_supported":                               indieauth.SupportedScopes,
+		"token_endpoint_auth_methods_supported":          []string{"none"},
+		"introspection_endpoint":                         s.cfg.Server.PublicURL + "/introspect",
+		"revocation_endpoint":                            s.cfg.Server.PublicURL + "/revoke",
 	})
 }
 
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if q.Get("response_type") != "code" {
+	if responseType := q.Get("response_type"); responseType != "" && responseType != "code" {
 		http.Error(w, "unsupported response_type", http.StatusBadRequest)
 		return
 	}
@@ -584,6 +586,7 @@ func (s *Server) issueCodeAndRedirect(w http.ResponseWriter, r *http.Request, re
 	if req.ClientState != "" {
 		values.Set("state", req.ClientState)
 	}
+	values.Set("iss", s.cfg.Server.Issuer)
 	redirect.RawQuery = values.Encode()
 	http.Redirect(w, r, redirect.String(), http.StatusFound)
 	return nil
@@ -752,6 +755,48 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		"token_type":   "Bearer",
 		"scope":        rec.Scope,
 		"me":           rec.Me,
+	}
+	if len(rec.ProfileJSON) > 0 {
+		var profile map[string]any
+		if err := json.Unmarshal(rec.ProfileJSON, &profile); err == nil {
+			response["profile"] = profile
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) handleAuthorizationCodeProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if err := r.ParseForm(); err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
+		return
+	}
+	code := r.Form.Get("code")
+	if code == "" {
+		s.audit(r.Context(), "authorization_code_profile_rejected", "", "", r.Form.Get("client_id"))
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "code is required")
+		return
+	}
+	rec, err := s.store.ConsumeAuthorizationCode(r.Context(), code, s.now())
+	if err != nil {
+		s.audit(r.Context(), "authorization_code_profile_rejected", "", "", r.Form.Get("client_id"))
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid")
+		return
+	}
+	if rec.ClientID != r.Form.Get("client_id") || rec.RedirectURI != r.Form.Get("redirect_uri") {
+		s.audit(r.Context(), "authorization_code_profile_rejected", "", rec.Me, r.Form.Get("client_id"))
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id or redirect_uri mismatch")
+		return
+	}
+	if rec.CodeChallenge != "" && !security.VerifyPKCES256(r.Form.Get("code_verifier"), rec.CodeChallenge) {
+		s.audit(r.Context(), "authorization_code_profile_rejected", "", rec.Me, rec.ClientID)
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		return
+	}
+	s.audit(r.Context(), "authorization_code_profile_returned", "", rec.Me, rec.ClientID)
+	response := map[string]any{
+		"me": rec.Me,
 	}
 	if len(rec.ProfileJSON) > 0 {
 		var profile map[string]any
