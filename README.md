@@ -207,6 +207,13 @@ Managed pages advertise the bridge endpoints and expose a minimal public
 `h-card`, but do not publish the Authentik subject. The same user may continue
 to use independently hosted profile pages through `dynamic_profiles`.
 
+Returning to `/setup` lets the owner edit the managed profile's display name,
+plain-text bio, optional HTTPS website link, and accent color. Updates require
+a short-lived encrypted setup credential bound to the same OIDC issuer and
+subject. Handles, identity bindings, arbitrary HTML, custom CSS, and remote
+profile images are deliberately not editable. Once customized, presentation
+fields are not overwritten by later changes to the user's OIDC claims.
+
 ## Embedded Login Tester
 
 `https://indieauth.example.org/test` is a generic IndieAuth client for

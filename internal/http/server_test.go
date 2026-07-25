@@ -332,6 +332,12 @@ func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
 		`Your hosted profile is ready`,
 		`Use this URL whenever an IndieAuth application asks for your website or profile`,
 		`Test this profile now`,
+		`Customize your hosted profile`,
+		`action="http://bridge.example/setup/profile"`,
+		`name="display_name"`,
+		`name="bio"`,
+		`name="website_url"`,
+		`name="accent"`,
 		`Optional: use your own website`,
 		`rel=&#34;indieauth-metadata&#34;`,
 		`rel=&#34;authorization_endpoint&#34;`,
@@ -431,6 +437,96 @@ func TestManagedProfileHandleNormalizationAndCollision(t *testing.T) {
 	}
 	if renamed.Handle != "eric" {
 		t.Fatalf("username change must not change identity URL: %q", renamed.Handle)
+	}
+	first.DisplayName = "My chosen name"
+	first.Bio = "A custom bio."
+	first.Accent = "blue"
+	first.Customized = true
+	first.UpdatedAt = time.Now()
+	if err := app.store.UpdateManagedProfile(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	customized, err := app.ensureManagedProfile(context.Background(), backends.Identity{
+		Subject: "first", PreferredUsername: "renamed-again", Name: "Changed in Authentik",
+	}, "http://auth.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customized.DisplayName != "My chosen name" || customized.Bio != "A custom bio." || customized.Accent != "blue" {
+		t.Fatalf("setup must preserve profile customizations: %+v", customized)
+	}
+}
+
+func TestManagedProfileUpdateRequiresIdentityAndValidatesFields(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.ManagedProfiles.Enabled = true
+	app.cfg.ManagedProfiles.Backend = "authentik"
+	profile, err := app.ensureManagedProfile(context.Background(), backends.Identity{
+		Subject: "auth-sub", PreferredUsername: "eric", Name: "Eric",
+	}, "http://auth.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityToken, err := app.sealSetupIdentity(profile.Issuer, profile.Subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"identity_token": {identityToken},
+		"display_name":   {"Eric W."},
+		"bio":            {"Builds small internet things."},
+		"website_url":    {"https://eric.example/about"},
+		"accent":         {"violet"},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/setup/profile", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "http://bridge.example/@eric" {
+		t.Fatalf("update status=%d location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	updated, err := app.store.GetManagedProfileByIdentity(context.Background(), profile.Issuer, profile.Subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.DisplayName != "Eric W." || updated.Bio != "Builds small internet things." ||
+		updated.WebsiteURL != "https://eric.example/about" || updated.Accent != "violet" || !updated.Customized {
+		t.Fatalf("unexpected updated profile: %+v", updated)
+	}
+
+	rec = httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/@eric", nil))
+	for _, want := range []string{
+		`data-accent="violet"`,
+		`class="bio p-note">Builds small internet things.`,
+		`href="https://eric.example/about" rel="me"`,
+		`Edit profile`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("customized profile missing %q: %s", want, rec.Body.String())
+		}
+	}
+	if strings.Contains(rec.Body.String(), identityToken) || strings.Contains(rec.Body.String(), profile.Subject) {
+		t.Fatal("public profile leaked setup credentials or identity subject")
+	}
+
+	form.Set("website_url", "http://insecure.example/")
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/setup/profile", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("insecure website status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	form.Set("website_url", "")
+	form.Set("identity_token", "not-a-valid-token")
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/setup/profile", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -85,6 +85,10 @@ type ManagedProfile struct {
 	Issuer      string
 	Subject     string
 	DisplayName string
+	Bio         string
+	WebsiteURL  string
+	Accent      string
+	Customized  bool
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
