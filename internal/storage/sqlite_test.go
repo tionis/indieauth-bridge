@@ -151,7 +151,7 @@ func TestSchemaMigrationsRecorded(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count < 3 {
+	if count < 4 {
 		t.Fatalf("expected migrations to be recorded, got %d", count)
 	}
 }
@@ -182,12 +182,18 @@ func TestManagedProfileLifecycleAndUniqueness(t *testing.T) {
 		t.Fatalf("expected identity conflict, got %v", err)
 	}
 	profile.DisplayName = "Eric W."
+	profile.Bio = "Builds small internet things."
+	profile.WebsiteURL = "https://example.test/"
+	profile.Accent = "violet"
+	profile.Customized = true
 	profile.UpdatedAt = now.Add(time.Minute)
 	if err := store.UpdateManagedProfile(ctx, profile); err != nil {
 		t.Fatal(err)
 	}
 	got, err = store.GetManagedProfileByIdentity(ctx, profile.Issuer, profile.Subject)
-	if err != nil || got.Handle != "eric" || got.DisplayName != "Eric W." {
+	if err != nil || got.Handle != "eric" || got.DisplayName != "Eric W." ||
+		got.Bio != profile.Bio || got.WebsiteURL != profile.WebsiteURL ||
+		got.Accent != "violet" || !got.Customized {
 		t.Fatalf("identity lookup/update failed: profile=%+v err=%v", got, err)
 	}
 }

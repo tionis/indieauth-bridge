@@ -143,6 +143,14 @@ func (s *SQLite) migrate(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if err := s.applyMigration(ctx, 4, "managed_profile_customization", []string{
+		`ALTER TABLE managed_profiles ADD COLUMN bio TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE managed_profiles ADD COLUMN website_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE managed_profiles ADD COLUMN accent TEXT NOT NULL DEFAULT 'teal'`,
+		`ALTER TABLE managed_profiles ADD COLUMN customized INTEGER NOT NULL DEFAULT 0`,
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -368,9 +376,10 @@ func (s *SQLite) CreateAuditEvent(ctx context.Context, event AuditEvent) error {
 
 func (s *SQLite) CreateManagedProfile(ctx context.Context, profile ManagedProfile) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO managed_profiles
-		(handle, issuer, subject, display_name, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		profile.Handle, profile.Issuer, profile.Subject, profile.DisplayName,
+		(handle, issuer, subject, display_name, bio, website_url, accent, customized, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		profile.Handle, profile.Issuer, profile.Subject, profile.DisplayName, profile.Bio,
+		profile.WebsiteURL, profile.Accent, profile.Customized,
 		profile.CreatedAt.Unix(), profile.UpdatedAt.Unix())
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
 		return ErrConflict
@@ -379,12 +388,12 @@ func (s *SQLite) CreateManagedProfile(ctx context.Context, profile ManagedProfil
 }
 
 func (s *SQLite) GetManagedProfileByHandle(ctx context.Context, handle string) (ManagedProfile, error) {
-	return scanManagedProfile(s.db.QueryRowContext(ctx, `SELECT handle, issuer, subject, display_name, created_at, updated_at
+	return scanManagedProfile(s.db.QueryRowContext(ctx, `SELECT handle, issuer, subject, display_name, bio, website_url, accent, customized, created_at, updated_at
 		FROM managed_profiles WHERE handle = ? COLLATE NOCASE`, handle))
 }
 
 func (s *SQLite) GetManagedProfileByIdentity(ctx context.Context, issuer, subject string) (ManagedProfile, error) {
-	return scanManagedProfile(s.db.QueryRowContext(ctx, `SELECT handle, issuer, subject, display_name, created_at, updated_at
+	return scanManagedProfile(s.db.QueryRowContext(ctx, `SELECT handle, issuer, subject, display_name, bio, website_url, accent, customized, created_at, updated_at
 		FROM managed_profiles WHERE issuer = ? AND subject = ?`, issuer, subject))
 }
 
@@ -396,6 +405,10 @@ func scanManagedProfile(row *sql.Row) (ManagedProfile, error) {
 		&profile.Issuer,
 		&profile.Subject,
 		&profile.DisplayName,
+		&profile.Bio,
+		&profile.WebsiteURL,
+		&profile.Accent,
+		&profile.Customized,
 		&createdAt,
 		&updatedAt,
 	)
@@ -412,9 +425,10 @@ func scanManagedProfile(row *sql.Row) (ManagedProfile, error) {
 
 func (s *SQLite) UpdateManagedProfile(ctx context.Context, profile ManagedProfile) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE managed_profiles
-		SET display_name = ?, updated_at = ?
+		SET display_name = ?, bio = ?, website_url = ?, accent = ?, customized = ?, updated_at = ?
 		WHERE issuer = ? AND subject = ?`,
-		profile.DisplayName, profile.UpdatedAt.Unix(), profile.Issuer, profile.Subject)
+		profile.DisplayName, profile.Bio, profile.WebsiteURL, profile.Accent, profile.Customized,
+		profile.UpdatedAt.Unix(), profile.Issuer, profile.Subject)
 	if err != nil {
 		return err
 	}

@@ -268,11 +268,21 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
     .profile-card { padding: 22px; border: 1px solid var(--accent); border-radius: 10px; background: var(--surface); }
     .profile-card h1 { margin-bottom: 10px; }
     .profile-url { display: inline-block; margin: 6px 0 14px; overflow-wrap: anywhere; font-size: 18px; }
-    form { display: flex; gap: 10px; margin-top: 12px; }
-    input[type="url"] { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
+    .profile-editor { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; padding: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+    .profile-editor .wide { grid-column: 1 / -1; }
+    label { display: block; margin-bottom: 6px; font-weight: 750; }
+    .hint { margin: 5px 0 0; font-size: 13px; }
+    input, textarea, select { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; }
+    textarea { min-height: 110px; resize: vertical; }
+    .check-form { display: flex; gap: 10px; margin-top: 12px; }
+    .check-form input[type="url"] { flex: 1; }
     button { padding: 11px 16px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
     a { color: var(--accent); font-weight: 700; }
-    @media (max-width: 620px) { form { flex-direction: column; } }
+    @media (max-width: 620px) {
+      .profile-editor { grid-template-columns: 1fr; }
+      .profile-editor .wide { grid-column: auto; }
+      .check-form { flex-direction: column; }
+    }
   </style>
   <script src="/theme.js"></script>
 </head>
@@ -286,6 +296,36 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
       <p>It remains bound to your account even if your Authentik username later changes.</p>
       <p><a href="{{.TestURL}}?me={{.ManagedProfileURL}}">Test this profile now</a></p>
     </section>
+    <h2>Customize your hosted profile</h2>
+    <p>Your handle and sign-in URL stay fixed. These presentation details can be changed whenever you sign in here.</p>
+    <form class="profile-editor" method="post" action="{{.ProfileUpdateAction}}">
+      <input type="hidden" name="identity_token" value="{{.IdentityToken}}">
+      <div>
+        <label for="display-name">Display name</label>
+        <input id="display-name" name="display_name" value="{{.ManagedDisplayName}}" maxlength="80" required>
+      </div>
+      <div>
+        <label for="accent">Accent</label>
+        <select id="accent" name="accent">
+          <option value="teal" {{if eq .ManagedAccent "teal"}}selected{{end}}>Teal</option>
+          <option value="blue" {{if eq .ManagedAccent "blue"}}selected{{end}}>Blue</option>
+          <option value="violet" {{if eq .ManagedAccent "violet"}}selected{{end}}>Violet</option>
+          <option value="rose" {{if eq .ManagedAccent "rose"}}selected{{end}}>Rose</option>
+          <option value="amber" {{if eq .ManagedAccent "amber"}}selected{{end}}>Amber</option>
+        </select>
+      </div>
+      <div class="wide">
+        <label for="bio">Bio</label>
+        <textarea id="bio" name="bio" maxlength="280" placeholder="A short introduction">{{.ManagedBio}}</textarea>
+        <p class="hint">Up to 280 characters. Plain text only.</p>
+      </div>
+      <div class="wide">
+        <label for="website-url">Personal website</label>
+        <input id="website-url" name="website_url" type="url" inputmode="url" value="{{.ManagedWebsiteURL}}" placeholder="https://example.com/">
+        <p class="hint">Optional. HTTPS links only.</p>
+      </div>
+      <div class="wide"><button type="submit">Save and view profile</button></div>
+    </form>
     {{else}}
     <h1>Connect your website</h1>
     {{end}}
@@ -302,7 +342,7 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 
     <h2>3. Check the published page</h2>
     <p>Deploy the page, then enter its full URL. The bridge will verify the endpoint links and confirm that the identity tag matches the account you just used.</p>
-    <form method="post" action="{{.CheckAction}}">
+    <form class="check-form" method="post" action="{{.CheckAction}}">
       <input type="hidden" name="identity_token" value="{{.IdentityToken}}">
       <input name="me" type="url" inputmode="url" placeholder="https://example.com/" required>
       <button type="submit">Check profile</button>
@@ -395,6 +435,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /setup", s.handleSetup)
 	mux.HandleFunc("POST /setup/check", s.handleSetupCheck)
+	mux.HandleFunc("POST /setup/profile", s.handleManagedProfileUpdate)
 	mux.HandleFunc("GET /test", s.handleTestClient)
 	mux.HandleFunc("POST /test/start", s.handleTestStart)
 	mux.HandleFunc("GET /test/callback", s.handleTestCallback)
@@ -830,6 +871,7 @@ func (s *Server) renderSetupIdentity(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 	managedProfileURL := ""
+	managedProfile := storage.ManagedProfile{}
 	if s.cfg.ManagedProfiles.Enabled {
 		profile, err := s.ensureManagedProfile(ctx, identity, issuer)
 		if err != nil {
@@ -837,21 +879,31 @@ func (s *Server) renderSetupIdentity(ctx context.Context, w http.ResponseWriter,
 			http.Error(w, "managed profile provisioning failed", http.StatusInternalServerError)
 			return
 		}
+		managedProfile = profile
 		managedProfileURL = s.managedProfileURL(profile.Handle)
+	}
+	managedAccent := managedProfile.Accent
+	if !managedProfileAccents[managedAccent] {
+		managedAccent = "teal"
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := setupTemplate.Execute(w, map[string]any{
-		"DiscoveryFragment": discoveryFragment,
-		"IdentityFragment":  identityFragment,
-		"IdentityToken":     identityToken,
-		"ManagedProfileURL": managedProfileURL,
-		"ExternalProfiles":  s.cfg.DynamicProfiles.Enabled,
-		"CheckAction":       s.cfg.Server.PublicURL + "/setup/check",
-		"TestURL":           s.cfg.Server.PublicURL + "/test",
-		"HomeURL":           s.cfg.Server.PublicURL + "/",
+		"DiscoveryFragment":   discoveryFragment,
+		"IdentityFragment":    identityFragment,
+		"IdentityToken":       identityToken,
+		"ManagedProfileURL":   managedProfileURL,
+		"ManagedDisplayName":  managedProfile.DisplayName,
+		"ManagedBio":          managedProfile.Bio,
+		"ManagedWebsiteURL":   managedProfile.WebsiteURL,
+		"ManagedAccent":       managedAccent,
+		"ExternalProfiles":    s.cfg.DynamicProfiles.Enabled,
+		"CheckAction":         s.cfg.Server.PublicURL + "/setup/check",
+		"ProfileUpdateAction": s.cfg.Server.PublicURL + "/setup/profile",
+		"TestURL":             s.cfg.Server.PublicURL + "/test",
+		"HomeURL":             s.cfg.Server.PublicURL + "/",
 	}); err != nil {
 		s.logger.Error("setup page render failed", "err", err)
 	}
