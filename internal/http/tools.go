@@ -58,6 +58,7 @@ var setupCheckTemplate = template.Must(template.New("setup-check").Parse(`<!doct
     code { overflow-wrap: anywhere; }
     a { color: inherit; font-weight: 700; }
   </style>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -97,6 +98,7 @@ var testClientTemplate = template.Must(template.New("test-client").Parse(`<!doct
     a { color: var(--accent); font-weight: 700; }
     @media (max-width: 600px) { .row { flex-direction: column; } }
   </style>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -132,6 +134,7 @@ var testResultTemplate = template.Must(template.New("test-result").Parse(`<!doct
     pre { overflow: auto; padding: 14px; border-radius: 7px; background: #111827; color: #f9fafb; white-space: pre-wrap; word-break: break-word; }
     .error { color: var(--error); } a { color: var(--accent); font-weight: 700; }
   </style>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -238,7 +241,7 @@ func (s *Server) handleTestClient(w http.ResponseWriter, r *http.Request) {
 	// The fixed same-origin form action redirects to the authorization endpoint
 	// discovered from the submitted profile. Browsers apply form-action across
 	// that redirect chain, so a self-only policy would block generic providers.
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := testClientTemplate.Execute(w, data); err != nil {

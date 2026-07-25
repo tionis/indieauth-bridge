@@ -112,6 +112,43 @@ func TestHumanReadableHealthPage(t *testing.T) {
 	}
 }
 
+func TestThemeToggleAssetsAndPolicy(t *testing.T) {
+	app := newTestServer(t)
+	handler := app.Routes()
+	for _, path := range []string{"/", "/health", "/test"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `<script src="/theme.js"></script>`) {
+			t.Fatalf("%s does not load the theme control", path)
+		}
+		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "script-src 'self'") {
+			t.Fatalf("%s CSP does not allow the same-origin theme script: %q", path, rec.Header().Get("Content-Security-Policy"))
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/theme.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("theme script status=%d", rec.Code)
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/javascript") {
+		t.Fatalf("unexpected theme script content type: %q", contentType)
+	}
+	for _, want := range []string{
+		`["system", "light", "dark"]`,
+		"prefers-color-scheme: dark",
+		"localStorage",
+		`aria-label", "Color theme`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("theme script missing %q", want)
+		}
+	}
+}
+
 func TestAuthorizeCallbackAndTokenFlow(t *testing.T) {
 	app := newTestServer(t)
 	handler := app.Routes()
