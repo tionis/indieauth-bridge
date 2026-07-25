@@ -130,6 +130,19 @@ func (s *SQLite) migrate(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if err := s.applyMigration(ctx, 3, "managed_profiles", []string{
+		`CREATE TABLE managed_profiles (
+			handle TEXT PRIMARY KEY COLLATE NOCASE,
+			issuer TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			UNIQUE (issuer, subject)
+		)`,
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -351,6 +364,68 @@ func (s *SQLite) CreateAuditEvent(ctx context.Context, event AuditEvent) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_events (event_type, subject, me, client_id, created_at) VALUES (?, ?, ?, ?, ?)`,
 		event.EventType, event.Subject, event.Me, event.ClientID, createdAt.Unix())
 	return err
+}
+
+func (s *SQLite) CreateManagedProfile(ctx context.Context, profile ManagedProfile) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO managed_profiles
+		(handle, issuer, subject, display_name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		profile.Handle, profile.Issuer, profile.Subject, profile.DisplayName,
+		profile.CreatedAt.Unix(), profile.UpdatedAt.Unix())
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
+		return ErrConflict
+	}
+	return err
+}
+
+func (s *SQLite) GetManagedProfileByHandle(ctx context.Context, handle string) (ManagedProfile, error) {
+	return scanManagedProfile(s.db.QueryRowContext(ctx, `SELECT handle, issuer, subject, display_name, created_at, updated_at
+		FROM managed_profiles WHERE handle = ? COLLATE NOCASE`, handle))
+}
+
+func (s *SQLite) GetManagedProfileByIdentity(ctx context.Context, issuer, subject string) (ManagedProfile, error) {
+	return scanManagedProfile(s.db.QueryRowContext(ctx, `SELECT handle, issuer, subject, display_name, created_at, updated_at
+		FROM managed_profiles WHERE issuer = ? AND subject = ?`, issuer, subject))
+}
+
+func scanManagedProfile(row *sql.Row) (ManagedProfile, error) {
+	var profile ManagedProfile
+	var createdAt, updatedAt int64
+	err := row.Scan(
+		&profile.Handle,
+		&profile.Issuer,
+		&profile.Subject,
+		&profile.DisplayName,
+		&createdAt,
+		&updatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ManagedProfile{}, ErrNotFound
+	}
+	if err != nil {
+		return ManagedProfile{}, err
+	}
+	profile.CreatedAt = time.Unix(createdAt, 0)
+	profile.UpdatedAt = time.Unix(updatedAt, 0)
+	return profile, nil
+}
+
+func (s *SQLite) UpdateManagedProfile(ctx context.Context, profile ManagedProfile) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE managed_profiles
+		SET display_name = ?, updated_at = ?
+		WHERE issuer = ? AND subject = ?`,
+		profile.DisplayName, profile.UpdatedAt.Unix(), profile.Issuer, profile.Subject)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *SQLite) Cleanup(ctx context.Context, now time.Time) error {

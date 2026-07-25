@@ -304,6 +304,8 @@ func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
 	app := newTestServer(t)
 	app.cfg.DynamicProfiles.Enabled = true
 	app.cfg.DynamicProfiles.Backend = "authentik"
+	app.cfg.ManagedProfiles.Enabled = true
+	app.cfg.ManagedProfiles.Backend = "authentik"
 	handler := app.Routes()
 
 	rec := httptest.NewRecorder()
@@ -320,6 +322,9 @@ func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "http://auth.example/ auth-sub") {
 		t.Fatalf("setup page does not contain identity metadata: %s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), "http://bridge.example/@eric") {
+		t.Fatalf("setup page does not contain hosted profile: %s", rec.Body.String())
+	}
 	for _, fragment := range []string{
 		`rel=&#34;indieauth-metadata&#34;`,
 		`rel=&#34;authorization_endpoint&#34;`,
@@ -334,6 +339,91 @@ func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("setup response should not be cached")
+	}
+
+	rec = httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/@eric", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("managed profile status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{
+		`class="h-card"`,
+		`rel="indieauth-metadata"`,
+		`http://bridge.example/@eric`,
+		`Test this login`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("managed profile missing %q: %s", want, rec.Body.String())
+		}
+	}
+	if strings.Contains(rec.Body.String(), "auth-sub") {
+		t.Fatal("managed profile must not expose the Authentik subject")
+	}
+}
+
+func TestManagedProfileAuthorizeUsesStoredImmutableBinding(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.ManagedProfiles.Enabled = true
+	app.cfg.ManagedProfiles.Backend = "authentik"
+	now := time.Now()
+	if err := app.store.CreateManagedProfile(context.Background(), storage.ManagedProfile{
+		Handle: "eric", Issuer: "http://auth.example/", Subject: "auth-sub",
+		DisplayName: "Eric", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	authURL := "/authorize?response_type=code&me=http%3A%2F%2Fbridge.example%2F%40eric&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&state=client-state&scope=profile&code_challenge=" +
+		url.QueryEscape(pkceChallenge(verifier)) + "&code_challenge_method=S256"
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	callback, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callback.Query().Get("code") == "" || callback.Query().Get("state") != "client-state" {
+		t.Fatalf("unexpected callback: %s", callback.String())
+	}
+}
+
+func TestManagedProfileHandleNormalizationAndCollision(t *testing.T) {
+	if got := normalizeManagedHandle("  Eric Wéndland  "); got != "eric-w-ndland" {
+		t.Fatalf("unexpected normalized handle: %q", got)
+	}
+	app := newTestServer(t)
+	app.cfg.ManagedProfiles.Enabled = true
+	app.cfg.ManagedProfiles.Backend = "authentik"
+	first, err := app.ensureManagedProfile(context.Background(), backends.Identity{
+		Subject: "first", PreferredUsername: "Eric", Name: "First Eric",
+	}, "http://auth.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.ensureManagedProfile(context.Background(), backends.Identity{
+		Subject: "second", PreferredUsername: "Eric", Name: "Second Eric",
+	}, "http://auth.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Handle != "eric" || second.Handle == "eric" || !strings.HasPrefix(second.Handle, "eric-") {
+		t.Fatalf("unexpected collision handles: first=%q second=%q", first.Handle, second.Handle)
+	}
+	renamed, err := app.ensureManagedProfile(context.Background(), backends.Identity{
+		Subject: "first", PreferredUsername: "renamed", Name: "First Eric",
+	}, "http://auth.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Handle != "eric" {
+		t.Fatalf("username change must not change identity URL: %q", renamed.Handle)
 	}
 }
 
