@@ -115,6 +115,8 @@ func writeConfigSummary(cfg config.Config) {
 		"issuer":                            cfg.Server.Issuer,
 		"public_url":                        cfg.Server.PublicURL,
 		"profile_count":                     len(cfg.Profiles),
+		"dynamic_profiles_enabled":          cfg.DynamicProfiles.Enabled,
+		"dynamic_profiles_backend":          cfg.DynamicProfiles.Backend,
 		"backends":                          backendNames,
 		"storage_type":                      cfg.Storage.Type,
 		"require_https":                     cfg.Security.RequireHTTPS,

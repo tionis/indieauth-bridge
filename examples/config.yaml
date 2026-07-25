@@ -21,18 +21,15 @@ rate_limit:
   burst: 20
   trusted_proxies: []
 
-profiles:
-  - me: "https://eric.example/"
-    display_name: "Eric"
-    email: "eric@example.org"
-    backend: "authentik"
-    allowed_subjects:
-      - "authentik-user-sub"
-    allowed_usernames:
-      - "eric"
-    allowed_emails:
-      - "eric@example.org"
-    allowed_groups: []
+# Resolve arbitrary profile URLs from identity metadata published by the page.
+dynamic_profiles:
+  enabled: true
+  backend: "authentik"
+  metadata_name: "indieauth-identity"
+
+# Optional compatibility mappings. Dynamic-only deployments may leave this
+# list empty.
+profiles: []
 
 backends:
   authentik:

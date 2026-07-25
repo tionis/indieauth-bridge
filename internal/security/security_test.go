@@ -35,6 +35,27 @@ func TestPKCES256(t *testing.T) {
 	}
 }
 
+func TestSealRoundTripAndTamperRejection(t *testing.T) {
+	sealed, err := Seal("test-secret", []byte("short-lived state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := Open("test-secret", sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != "short-lived state" {
+		t.Fatalf("unexpected plaintext: %q", opened)
+	}
+	tampered := sealed[:len(sealed)-1] + "A"
+	if _, err := Open("test-secret", tampered); err == nil {
+		t.Fatal("tampered sealed value should be rejected")
+	}
+	if _, err := Open("other-secret", sealed); err == nil {
+		t.Fatal("wrong secret should be rejected")
+	}
+}
+
 func TestValidateRedirectURI(t *testing.T) {
 	if err := ValidateRedirectURI("https://client.example/app", "https://client.example/callback", false); err != nil {
 		t.Fatalf("same origin rejected: %v", err)
