@@ -108,7 +108,7 @@ var testClientTemplate = template.Must(template.New("test-client").Parse(`<!doct
       <form method="post" action="{{.StartURL}}">
         <label for="me">Profile URL</label>
         <div class="row">
-          <input id="me" name="me" type="url" inputmode="url" placeholder="https://example.com/" required>
+          <input id="me" name="me" type="url" inputmode="url" placeholder="https://example.com/" value="{{.Me}}" required>
           <button type="submit">Start login</button>
         </div>
       </form>
@@ -237,6 +237,7 @@ func (s *Server) handleTestClient(w http.ResponseWriter, r *http.Request) {
 		"StartURL":    s.cfg.Server.PublicURL + "/test/start",
 		"SetupURL":    s.cfg.Server.PublicURL + "/setup",
 		"HomeURL":     s.cfg.Server.PublicURL + "/",
+		"Me":          strings.TrimSpace(r.URL.Query().Get("me")),
 	}
 	// The fixed same-origin form action redirects to the authorization endpoint
 	// discovered from the submitted profile. Browsers apply form-action across

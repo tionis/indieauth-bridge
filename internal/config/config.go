@@ -37,6 +37,7 @@ type Config struct {
 	Security        SecurityConfig           `yaml:"security"`
 	RateLimit       RateLimitConfig          `yaml:"rate_limit"`
 	DynamicProfiles DynamicProfilesConfig    `yaml:"dynamic_profiles"`
+	ManagedProfiles ManagedProfilesConfig    `yaml:"managed_profiles"`
 	Profiles        []ProfileConfig          `yaml:"profiles"`
 	Backends        map[string]BackendConfig `yaml:"backends"`
 	Storage         StorageConfig            `yaml:"storage"`
@@ -72,6 +73,11 @@ type DynamicProfilesConfig struct {
 	Enabled      bool   `yaml:"enabled"`
 	Backend      string `yaml:"backend"`
 	MetadataName string `yaml:"metadata_name"`
+}
+
+type ManagedProfilesConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Backend string `yaml:"backend"`
 }
 
 type ProfileConfig struct {
@@ -121,6 +127,9 @@ func Default() Config {
 		},
 		DynamicProfiles: DynamicProfilesConfig{
 			MetadataName: "indieauth-identity",
+		},
+		ManagedProfiles: ManagedProfilesConfig{
+			Backend: "authentik",
 		},
 		Backends: map[string]BackendConfig{},
 		Storage: StorageConfig{
@@ -260,8 +269,8 @@ func (cfg *Config) Validate() error {
 	if cfg.RateLimit.Burst <= 0 {
 		cfg.RateLimit.Burst = 20
 	}
-	if len(cfg.Profiles) == 0 && !cfg.DynamicProfiles.Enabled {
-		return errors.New("at least one profile or dynamic_profiles.enabled is required")
+	if len(cfg.Profiles) == 0 && !cfg.DynamicProfiles.Enabled && !cfg.ManagedProfiles.Enabled {
+		return errors.New("at least one profile, dynamic_profiles.enabled, or managed_profiles.enabled is required")
 	}
 	seenProfiles := map[string]bool{}
 	for i := range cfg.Profiles {
@@ -315,6 +324,17 @@ func (cfg *Config) Validate() error {
 		}
 		if strings.ContainsAny(cfg.DynamicProfiles.MetadataName, " \t\r\n\"'<>") {
 			return errors.New("dynamic_profiles.metadata_name contains invalid characters")
+		}
+	}
+	if cfg.ManagedProfiles.Enabled {
+		if cfg.ManagedProfiles.Backend == "" {
+			return errors.New("managed_profiles.backend is required when managed profiles are enabled")
+		}
+		if _, ok := cfg.Backends[cfg.ManagedProfiles.Backend]; !ok {
+			return fmt.Errorf("managed_profiles.backend %q is not configured", cfg.ManagedProfiles.Backend)
+		}
+		if cfg.DynamicProfiles.Enabled && cfg.ManagedProfiles.Backend != cfg.DynamicProfiles.Backend {
+			return errors.New("managed_profiles.backend must match dynamic_profiles.backend when both are enabled")
 		}
 	}
 	if cfg.Storage.Type == "" {

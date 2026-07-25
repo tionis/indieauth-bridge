@@ -13,6 +13,7 @@ var (
 	ErrUsed     = errors.New("already used")
 	ErrExpired  = errors.New("expired")
 	ErrRevoked  = errors.New("revoked")
+	ErrConflict = errors.New("conflict")
 )
 
 type AuthRequest struct {
@@ -79,6 +80,15 @@ type AuditEvent struct {
 	CreatedAt time.Time
 }
 
+type ManagedProfile struct {
+	Handle      string
+	Issuer      string
+	Subject     string
+	DisplayName string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type Store interface {
 	Close() error
 	CreateAuthRequest(context.Context, AuthRequest) error
@@ -93,5 +103,9 @@ type Store interface {
 	GetConsentRequest(context.Context, string, time.Time) (ConsentRequest, error)
 	DeleteConsentRequest(context.Context, string) error
 	CreateAuditEvent(context.Context, AuditEvent) error
+	CreateManagedProfile(context.Context, ManagedProfile) error
+	GetManagedProfileByHandle(context.Context, string) (ManagedProfile, error)
+	GetManagedProfileByIdentity(context.Context, string, string) (ManagedProfile, error)
+	UpdateManagedProfile(context.Context, ManagedProfile) error
 	Cleanup(context.Context, time.Time) error
 }
