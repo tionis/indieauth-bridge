@@ -235,6 +235,10 @@ func (s *Server) handleTestClient(w http.ResponseWriter, r *http.Request) {
 		"SetupURL":    s.cfg.Server.PublicURL + "/setup",
 		"HomeURL":     s.cfg.Server.PublicURL + "/",
 	}
+	// The fixed same-origin form action redirects to the authorization endpoint
+	// discovered from the submitted profile. Browsers apply form-action across
+	// that redirect chain, so a self-only policy would block generic providers.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := testClientTemplate.Execute(w, data); err != nil {
