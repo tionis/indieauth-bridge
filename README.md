@@ -185,6 +185,28 @@ The page is the source of truth. Adding the same tag to multiple profile URLs
 links all of them to one OIDC identity; removing it revokes the binding. The
 identifier is public and allows those profile URLs to be correlated.
 
+## Managed Profiles
+
+Managed profiles give users who do not have a personal website a stable,
+ready-to-use IndieAuth identity on the bridge itself:
+
+```yaml
+managed_profiles:
+  enabled: true
+  backend: authentik
+```
+
+After signing in at `/setup`, the bridge creates
+`https://indieauth.example.org/@username`. The initial handle comes from the
+OIDC `preferred_username`, but ownership is stored against the immutable issuer
+and subject. Later username changes therefore do not change the identity URL,
+and a handle collision receives a deterministic suffix. Handles are never
+dynamically resolved through the identity-provider directory.
+
+Managed pages advertise the bridge endpoints and expose a minimal public
+`h-card`, but do not publish the Authentik subject. The same user may continue
+to use independently hosted profile pages through `dynamic_profiles`.
+
 ## Embedded Login Tester
 
 `https://indieauth.example.org/test` is a generic IndieAuth client for
@@ -425,6 +447,9 @@ Primary threats and mitigations:
   subject in constant time.
 - Dynamic profile SSRF: profile fetches reject local and private targets, limit
   redirects to the original origin, and cap response time and size.
+- Managed profile takeover: public handles are normalized and unique, while
+  ownership is keyed by immutable OIDC issuer and subject. Username changes do
+  not transfer or rename an established identity URL.
 - Tester mix-up and request forgery: the embedded client uses cryptographically
   protected short-lived state, PKCE S256, issuer checking when advertised, and
   an HttpOnly SameSite cookie.

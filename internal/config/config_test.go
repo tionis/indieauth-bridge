@@ -96,3 +96,19 @@ func TestDynamicProfilesAllowEmptyStaticProfileList(t *testing.T) {
 		t.Fatalf("unexpected metadata name: %s", cfg.DynamicProfiles.MetadataName)
 	}
 }
+
+func TestManagedProfilesAllowEmptyOtherProfileLists(t *testing.T) {
+	cfg := Default()
+	cfg.Server.PublicURL = "https://bridge.example"
+	cfg.Security.CookieSecret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cfg.ManagedProfiles.Enabled = true
+	cfg.Backends = map[string]BackendConfig{"authentik": {
+		Type: "authentik", Issuer: "https://auth.example/", ClientID: "id", ClientSecret: "secret", RedirectURI: "https://bridge.example/auth/callback",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("managed-only configuration should be valid: %v", err)
+	}
+	if cfg.ManagedProfiles.Backend != "authentik" {
+		t.Fatalf("unexpected managed backend: %s", cfg.ManagedProfiles.Backend)
+	}
+}

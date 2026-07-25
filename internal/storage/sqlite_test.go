@@ -151,7 +151,43 @@ func TestSchemaMigrationsRecorded(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count < 2 {
+	if count < 3 {
 		t.Fatalf("expected migrations to be recorded, got %d", count)
+	}
+}
+
+func TestManagedProfileLifecycleAndUniqueness(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now()
+	profile := ManagedProfile{
+		Handle: "eric", Issuer: "https://auth.example/", Subject: "sub",
+		DisplayName: "Eric", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateManagedProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetManagedProfileByHandle(ctx, "ERIC")
+	if err != nil || got.Subject != "sub" {
+		t.Fatalf("case-insensitive lookup failed: profile=%+v err=%v", got, err)
+	}
+	if err := store.CreateManagedProfile(ctx, ManagedProfile{
+		Handle: "other", Issuer: profile.Issuer, Subject: profile.Subject,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != ErrConflict {
+		t.Fatalf("expected identity conflict, got %v", err)
+	}
+	profile.DisplayName = "Eric W."
+	profile.UpdatedAt = now.Add(time.Minute)
+	if err := store.UpdateManagedProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetManagedProfileByIdentity(ctx, profile.Issuer, profile.Subject)
+	if err != nil || got.Handle != "eric" || got.DisplayName != "Eric W." {
+		t.Fatalf("identity lookup/update failed: profile=%+v err=%v", got, err)
 	}
 }

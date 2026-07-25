@@ -274,9 +274,16 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 </head>
 <body>
   <main>
-    <h1>Connect a profile to IndieAuth</h1>
-    <p>You are signed in. Add both fragments below anywhere inside the profile page's <code>&lt;head&gt;</code>. They tell IndieAuth clients where to log in and tell this bridge which Authentik account owns the page.</p>
+    <h1>Your IndieAuth profiles</h1>
+    {{if .ManagedProfileURL}}
+    <h2>Hosted profile</h2>
+    <p>Your ready-to-use profile is <a href="{{.ManagedProfileURL}}">{{.ManagedProfileURL}}</a>. It remains bound to your account even if your Authentik username later changes.</p>
+    <p><a href="{{.TestURL}}?me={{.ManagedProfileURL}}">Test the hosted profile</a></p>
+    {{end}}
 
+    {{if .ExternalProfiles}}
+    <h2>Use your own website</h2>
+    <p>Add both fragments below anywhere inside the profile page's <code>&lt;head&gt;</code>. They tell IndieAuth clients where to log in and tell this bridge which Authentik account owns the page.</p>
     <h2>1. Advertise the IndieAuth endpoints</h2>
     <pre><code>{{.DiscoveryFragment}}</code></pre>
 
@@ -294,6 +301,7 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 
     <h2>4. Exercise the complete login</h2>
     <p>Use the <a href="{{.TestURL}}">embedded IndieAuth tester</a> to run a real PKCE login and inspect the authorization and token responses.</p>
+    {{end}}
     <p><a href="{{.HomeURL}}">Return to the bridge</a></p>
   </main>
 </body>
@@ -391,6 +399,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /token", s.handleToken)
 	mux.HandleFunc("POST /introspect", s.handleIntrospect)
 	mux.HandleFunc("POST /revoke", s.handleRevoke)
+	mux.HandleFunc("GET /{profile}", s.handleManagedProfile)
 	return s.securityHeaders(s.rateLimit(mux))
 }
 
@@ -441,7 +450,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"HealthPageURL": s.cfg.Server.PublicURL + "/health",
 		"TestURL":       s.cfg.Server.PublicURL + "/test",
 		"SetupURL": func() string {
-			if s.cfg.DynamicProfiles.Enabled {
+			if s.cfg.DynamicProfiles.Enabled || s.cfg.ManagedProfiles.Enabled {
 				return s.cfg.Server.PublicURL + "/setup"
 			}
 			return ""
@@ -487,11 +496,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.DynamicProfiles.Enabled {
+	if !s.cfg.DynamicProfiles.Enabled && !s.cfg.ManagedProfiles.Enabled {
 		http.NotFound(w, r)
 		return
 	}
 	backendName := s.cfg.DynamicProfiles.Backend
+	if s.cfg.ManagedProfiles.Enabled {
+		backendName = s.cfg.ManagedProfiles.Backend
+	}
 	backend := s.backends[backendName]
 	if backend == nil {
 		http.Error(w, "profile backend is not available", http.StatusInternalServerError)
@@ -554,7 +566,12 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, staticProfile := s.cfg.ProfileByMe(me)
-	if !staticProfile && !s.cfg.DynamicProfiles.Enabled {
+	managedProfile, managedProfileURL, err := s.managedProfileForMe(r.Context(), me)
+	if err != nil {
+		http.Error(w, "unknown managed profile", http.StatusBadRequest)
+		return
+	}
+	if !staticProfile && !managedProfileURL && !s.cfg.DynamicProfiles.Enabled {
 		http.Error(w, "unknown me URL", http.StatusBadRequest)
 		return
 	}
@@ -580,7 +597,19 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var dynamicBinding indieauth.ProfileIdentityBinding
-	if !staticProfile {
+	if managedProfileURL {
+		dynamicBackend := s.cfg.ManagedProfiles.Backend
+		dynamicBinding = indieauth.ProfileIdentityBinding{
+			Me:      me,
+			Issuer:  managedProfile.Issuer,
+			Subject: managedProfile.Subject,
+		}
+		profile = config.ProfileConfig{
+			Me:          me,
+			DisplayName: managedProfile.DisplayName,
+			Backend:     dynamicBackend,
+		}
+	} else if !staticProfile {
 		dynamicBackend := s.cfg.DynamicProfiles.Backend
 		backendConfig := s.cfg.Backends[dynamicBackend]
 		dynamicBinding, err = indieauth.DiscoverProfileIdentity(
@@ -686,7 +715,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if setup, _ := ar.BackendState.Values[backendStateSetup].(bool); setup {
-		s.renderSetupIdentity(w, identity, s.cfg.Backends[ar.Backend].Issuer)
+		s.renderSetupIdentity(r.Context(), w, identity, s.cfg.Backends[ar.Backend].Issuer)
 		return
 	}
 	profileJSON := ar.ProfileJSON
@@ -765,7 +794,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) renderSetupIdentity(w http.ResponseWriter, identity backends.Identity, issuer string) {
+func (s *Server) renderSetupIdentity(ctx context.Context, w http.ResponseWriter, identity backends.Identity, issuer string) {
 	identityFragment := fmt.Sprintf(
 		`<meta name="%s" content="%s %s">`,
 		s.cfg.DynamicProfiles.MetadataName,
@@ -791,6 +820,16 @@ func (s *Server) renderSetupIdentity(w http.ResponseWriter, identity backends.Id
 		http.Error(w, "setup page creation failed", http.StatusInternalServerError)
 		return
 	}
+	managedProfileURL := ""
+	if s.cfg.ManagedProfiles.Enabled {
+		profile, err := s.ensureManagedProfile(ctx, identity, issuer)
+		if err != nil {
+			s.logger.Error("managed profile provisioning failed", "err", err)
+			http.Error(w, "managed profile provisioning failed", http.StatusInternalServerError)
+			return
+		}
+		managedProfileURL = s.managedProfileURL(profile.Handle)
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -799,6 +838,8 @@ func (s *Server) renderSetupIdentity(w http.ResponseWriter, identity backends.Id
 		"DiscoveryFragment": discoveryFragment,
 		"IdentityFragment":  identityFragment,
 		"IdentityToken":     identityToken,
+		"ManagedProfileURL": managedProfileURL,
+		"ExternalProfiles":  s.cfg.DynamicProfiles.Enabled,
 		"CheckAction":       s.cfg.Server.PublicURL + "/setup/check",
 		"TestURL":           s.cfg.Server.PublicURL + "/test",
 		"HomeURL":           s.cfg.Server.PublicURL + "/",
