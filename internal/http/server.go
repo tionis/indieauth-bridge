@@ -189,10 +189,11 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
   <main>
     <header>
       <div class="eyebrow">IndieAuth authorization server</div>
-      <h1>Use your own website as your sign-in identity.</h1>
-      <p class="lede">Connect a profile page to your account, then use that URL to sign in to IndieAuth-compatible applications.</p>
+      <h1>Use a hosted profile—or your own website—as your sign-in identity.</h1>
+      <p class="lede">No personal website? Create a ready-to-use profile here. If you already have a website, you can connect that instead.</p>
       <div class="actions">
-        {{if .SetupURL}}<a class="button" href="{{.SetupURL}}">Connect a profile</a>{{end}}
+        {{if .SetupURL}}<a class="button" href="{{.SetupURL}}">Create a hosted profile</a>{{end}}
+        {{if .SetupURL}}<a class="button secondary" href="{{.SetupURL}}">Connect your website</a>{{end}}
         <a class="button secondary" href="{{.TestURL}}">Test a login</a>
       </div>
       <a class="service-state" href="{{.HealthPageURL}}">Service is responding</a>
@@ -210,7 +211,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
     </section>
 
     <footer>
-      New here? Start by connecting a profile, publish the generated HTML, then use the login tester to verify the complete flow.
+      New here? Create a hosted profile and use it immediately. Connecting a personal website remains available as an optional, more customizable identity.
     </footer>
   </main>
 </body>
@@ -254,7 +255,7 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>IndieAuth Profile Tag</title>
+  <title>Your IndieAuth profile</title>
   <style>
     :root { color-scheme: light; --bg: #f7f8f5; --surface: #fff; --ink: #1b1f23; --muted: #5f6b76; --line: #d9dfdf; --accent: #0f766e; }
     * { box-sizing: border-box; }
@@ -264,6 +265,9 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
     h2 { margin: 28px 0 8px; font-size: 21px; }
     p, li { color: var(--muted); }
     pre { overflow-x: auto; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); white-space: pre-wrap; word-break: break-all; }
+    .profile-card { padding: 22px; border: 1px solid var(--accent); border-radius: 10px; background: var(--surface); }
+    .profile-card h1 { margin-bottom: 10px; }
+    .profile-url { display: inline-block; margin: 6px 0 14px; overflow-wrap: anywhere; font-size: 18px; }
     form { display: flex; gap: 10px; margin-top: 12px; }
     input[type="url"] { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
     button { padding: 11px 16px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
@@ -274,15 +278,20 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 </head>
 <body>
   <main>
-    <h1>Your IndieAuth profiles</h1>
     {{if .ManagedProfileURL}}
-    <h2>Hosted profile</h2>
-    <p>Your ready-to-use profile is <a href="{{.ManagedProfileURL}}">{{.ManagedProfileURL}}</a>. It remains bound to your account even if your Authentik username later changes.</p>
-    <p><a href="{{.TestURL}}?me={{.ManagedProfileURL}}">Test the hosted profile</a></p>
+    <section class="profile-card">
+      <h1>Your hosted profile is ready</h1>
+      <p>Use this URL whenever an IndieAuth application asks for your website or profile:</p>
+      <a class="profile-url" href="{{.ManagedProfileURL}}">{{.ManagedProfileURL}}</a>
+      <p>It remains bound to your account even if your Authentik username later changes.</p>
+      <p><a href="{{.TestURL}}?me={{.ManagedProfileURL}}">Test this profile now</a></p>
+    </section>
+    {{else}}
+    <h1>Connect your website</h1>
     {{end}}
 
     {{if .ExternalProfiles}}
-    <h2>Use your own website</h2>
+    <h2>Optional: use your own website</h2>
     <p>Add both fragments below anywhere inside the profile page's <code>&lt;head&gt;</code>. They tell IndieAuth clients where to log in and tell this bridge which Authentik account owns the page.</p>
     <h2>1. Advertise the IndieAuth endpoints</h2>
     <pre><code>{{.DiscoveryFragment}}</code></pre>

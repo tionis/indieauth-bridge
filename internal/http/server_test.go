@@ -54,6 +54,8 @@ func TestMetadata(t *testing.T) {
 
 func TestIndexLandingPage(t *testing.T) {
 	app := newTestServer(t)
+	app.cfg.ManagedProfiles.Enabled = true
+	app.cfg.ManagedProfiles.Backend = "authentik"
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	app.Routes().ServeHTTP(rec, req)
@@ -66,7 +68,8 @@ func TestIndexLandingPage(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"IndieAuth authorization server",
-		"Connect a profile",
+		"Create a hosted profile",
+		"Connect your website",
 		"Test a login",
 		"Server details",
 		"http://bridge.example/authorize",
@@ -76,7 +79,7 @@ func TestIndexLandingPage(t *testing.T) {
 		"http://bridge.example/health",
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("landing page missing %q", want)
+			t.Fatalf("landing page missing %q: %s", want, body)
 		}
 	}
 	for _, obsolete := range []string{"Static profiles", "Backends"} {
@@ -326,6 +329,10 @@ func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
 		t.Fatalf("setup page does not contain hosted profile: %s", rec.Body.String())
 	}
 	for _, fragment := range []string{
+		`Your hosted profile is ready`,
+		`Use this URL whenever an IndieAuth application asks for your website or profile`,
+		`Test this profile now`,
+		`Optional: use your own website`,
 		`rel=&#34;indieauth-metadata&#34;`,
 		`rel=&#34;authorization_endpoint&#34;`,
 		`rel=&#34;token_endpoint&#34;`,
