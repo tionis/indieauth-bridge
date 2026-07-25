@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -117,6 +116,20 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
       color: var(--accent-ink);
       background: transparent;
     }
+    .service-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .service-state::before {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #16a34a;
+      content: "";
+    }
     section {
       padding: 30px 0;
       border-bottom: 1px solid var(--line);
@@ -126,37 +139,31 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
       font-size: 20px;
       letter-spacing: 0;
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 14px;
-    }
-    .metric, .endpoint {
+    .details {
+      margin: 0;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--surface);
-      padding: 16px;
+      overflow: hidden;
     }
-    .metric span, .endpoint span {
-      display: block;
+    .details div {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 16px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .details div:last-child { border-bottom: 0; }
+    .details dt {
       color: var(--muted);
       font-size: 13px;
       font-weight: 700;
       text-transform: uppercase;
     }
-    .metric strong {
-      display: block;
-      margin-top: 7px;
-      font-size: 24px;
-    }
-    .endpoint {
-      display: grid;
-      gap: 8px;
-    }
-    .endpoint a {
+    .details dd { min-width: 0; margin: 0; }
+    .details a, .details code {
       overflow-wrap: anywhere;
       color: var(--accent-ink);
-      font-weight: 700;
       text-decoration-thickness: 1px;
       text-underline-offset: 3px;
     }
@@ -172,7 +179,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
     }
     @media (max-width: 760px) {
       main { width: min(100% - 24px, 1040px); padding-top: 34px; }
-      .grid { grid-template-columns: 1fr; }
+      .details div { grid-template-columns: 1fr; gap: 4px; }
       h1 { font-size: 40px; }
     }
   </style>
@@ -181,38 +188,61 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
   <main>
     <header>
       <div class="eyebrow">IndieAuth authorization server</div>
-      <h1>Sign in with a profile URL through your OIDC provider.</h1>
-      <p class="lede">This bridge resolves identity metadata from IndieAuth profile URLs and delegates authentication to an OIDC backend such as authentik.</p>
+      <h1>Use your own website as your sign-in identity.</h1>
+      <p class="lede">Connect a profile page to your account, then use that URL to sign in to IndieAuth-compatible applications.</p>
       <div class="actions">
-        <a class="button" href="{{.MetadataURL}}">View metadata</a>
-        {{if .SetupURL}}<a class="button secondary" href="{{.SetupURL}}">Get profile tag</a>{{end}}
-        <a class="button secondary" href="{{.TestURL}}">Test IndieAuth</a>
-        <a class="button secondary" href="{{.HealthURL}}">Check health</a>
+        {{if .SetupURL}}<a class="button" href="{{.SetupURL}}">Connect a profile</a>{{end}}
+        <a class="button secondary" href="{{.TestURL}}">Test a login</a>
       </div>
+      <a class="service-state" href="{{.HealthPageURL}}">Service is responding</a>
     </header>
 
-    <section aria-labelledby="status-heading">
-      <h2 id="status-heading">Status</h2>
-      <div class="grid">
-        <div class="metric"><span>Issuer</span><strong>{{.Issuer}}</strong></div>
-        <div class="metric"><span>Static profiles</span><strong>{{.ProfileCount}}</strong></div>
-        <div class="metric"><span>Backends</span><strong>{{.BackendNames}}</strong></div>
-      </div>
+    <section aria-labelledby="details-heading">
+      <h2 id="details-heading">Server details</h2>
+      <dl class="details">
+        <div><dt>Issuer</dt><dd><code>{{.Issuer}}</code></dd></div>
+        <div><dt>Authorization</dt><dd><a href="{{.AuthorizeURL}}">/authorize</a></dd></div>
+        <div><dt>Token</dt><dd><a href="{{.TokenURL}}">/token</a></dd></div>
+        <div><dt>Metadata</dt><dd><a href="{{.MetadataURL}}">/.well-known/oauth-authorization-server</a></dd></div>
+      </dl>
       {{if .DevMode}}<p class="note">Development mode is enabled. Do not use this configuration for public traffic.</p>{{end}}
     </section>
 
-    <section aria-labelledby="endpoints-heading">
-      <h2 id="endpoints-heading">Endpoints</h2>
-      <div class="grid">
-        <div class="endpoint"><span>Authorization</span><a href="{{.AuthorizeURL}}">{{.AuthorizeURL}}</a></div>
-        <div class="endpoint"><span>Token</span><a href="{{.TokenURL}}">{{.TokenURL}}</a></div>
-        <div class="endpoint"><span>Metadata</span><a href="{{.MetadataURL}}">{{.MetadataURL}}</a></div>
-      </div>
-    </section>
-
     <footer>
-      Publish the metadata, authorization, and token links from your profile site so IndieAuth clients can discover this bridge.
+      New here? Start by connecting a profile, publish the generated HTML, then use the login tester to verify the complete flow.
     </footer>
+  </main>
+</body>
+</html>`))
+
+var healthTemplate = template.Must(template.New("health").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IndieAuth Bridge Health</title>
+  <style>
+    :root { color-scheme: light; --bg: #f7f8f5; --surface: #fff; --ink: #1b1f23; --muted: #5f6b76; --line: #d9dfdf; --ok: #047857; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
+    main { width: min(620px, calc(100% - 28px)); padding: 32px 0; }
+    .card { padding: 26px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+    .status { display: flex; align-items: center; gap: 10px; color: var(--ok); font-size: 14px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+    .status::before { width: 11px; height: 11px; border-radius: 999px; background: #16a34a; content: ""; }
+    h1 { margin: 12px 0 8px; font-size: 34px; }
+    p { margin: 0 0 18px; color: var(--muted); }
+    code { overflow-wrap: anywhere; }
+    a { color: var(--ok); font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <div class="status">Healthy</div>
+      <h1>IndieAuth bridge is responding</h1>
+      <p>The application handled this request successfully. Automated monitoring remains available at <code>/healthz</code>.</p>
+      <a href="{{.HomeURL}}">Return to the bridge</a>
+    </div>
   </main>
 </body>
 </html>`))
@@ -339,6 +369,7 @@ func NewServer(cfg config.Config, store storage.Store, backendMap map[string]bac
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /setup", s.handleSetup)
 	mux.HandleFunc("POST /setup/check", s.handleSetupCheck)
@@ -397,32 +428,36 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	names := make([]string, 0, len(s.backends))
-	for name := range s.backends {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	data := map[string]any{
-		"Issuer":       s.cfg.Server.Issuer,
-		"AuthorizeURL": s.cfg.Server.PublicURL + "/authorize",
-		"TokenURL":     s.cfg.Server.PublicURL + "/token",
-		"MetadataURL":  s.cfg.Server.PublicURL + "/.well-known/oauth-authorization-server",
-		"HealthURL":    s.cfg.Server.PublicURL + "/healthz",
-		"TestURL":      s.cfg.Server.PublicURL + "/test",
+		"Issuer":        s.cfg.Server.Issuer,
+		"AuthorizeURL":  s.cfg.Server.PublicURL + "/authorize",
+		"TokenURL":      s.cfg.Server.PublicURL + "/token",
+		"MetadataURL":   s.cfg.Server.PublicURL + "/.well-known/oauth-authorization-server",
+		"HealthPageURL": s.cfg.Server.PublicURL + "/health",
+		"TestURL":       s.cfg.Server.PublicURL + "/test",
 		"SetupURL": func() string {
 			if s.cfg.DynamicProfiles.Enabled {
 				return s.cfg.Server.PublicURL + "/setup"
 			}
 			return ""
 		}(),
-		"ProfileCount": len(s.cfg.Profiles),
-		"BackendNames": strings.Join(names, ", "),
-		"DevMode":      s.cfg.Security.DevMode,
+		"DevMode": s.cfg.Security.DevMode,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := landingTemplate.Execute(w, data); err != nil {
 		s.logger.Error("landing page render failed", "err", err)
+	}
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := healthTemplate.Execute(w, map[string]string{
+		"HomeURL": s.cfg.Server.PublicURL + "/",
+	}); err != nil {
+		s.logger.Error("health page render failed", "err", err)
 	}
 }
 

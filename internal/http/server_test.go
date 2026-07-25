@@ -66,19 +66,49 @@ func TestIndexLandingPage(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"IndieAuth authorization server",
+		"Connect a profile",
+		"Test a login",
+		"Server details",
 		"http://bridge.example/authorize",
 		"http://bridge.example/token",
 		"http://bridge.example/.well-known/oauth-authorization-server",
 		"http://bridge.example/test",
+		"http://bridge.example/health",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("landing page missing %q", want)
+		}
+	}
+	for _, obsolete := range []string{"Static profiles", "Backends"} {
+		if strings.Contains(body, obsolete) {
+			t.Fatalf("landing page still contains obsolete detail %q", obsolete)
 		}
 	}
 	for _, leaked := range []string{"client-secret", "change-me", "auth-sub"} {
 		if strings.Contains(body, leaked) {
 			t.Fatalf("landing page leaked sensitive or mapping value %q", leaked)
 		}
+	}
+}
+
+func TestHumanReadableHealthPage(t *testing.T) {
+	app := newTestServer(t)
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health page status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "IndieAuth bridge is responding") {
+		t.Fatalf("health page does not show a visible result: %s", rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("health page should not be cached, got %q", rec.Header().Get("Cache-Control"))
+	}
+
+	rec = httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("machine health endpoint status=%d", rec.Code)
 	}
 }
 
