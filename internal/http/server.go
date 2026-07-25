@@ -183,6 +183,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
       h1 { font-size: 40px; }
     }
   </style>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -234,6 +235,7 @@ var healthTemplate = template.Must(template.New("health").Parse(`<!doctype html>
     code { overflow-wrap: anywhere; }
     a { color: var(--ok); font-weight: 700; }
   </style>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -268,6 +270,7 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
     a { color: var(--accent); font-weight: 700; }
     @media (max-width: 620px) { form { flex-direction: column; } }
   </style>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -330,6 +333,7 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
       });
     });
   </script>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <main>
@@ -369,6 +373,7 @@ func NewServer(cfg config.Config, store storage.Store, backendMap map[string]bac
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /theme.js", s.handleThemeScript)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /setup", s.handleSetup)
@@ -421,7 +426,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
@@ -933,7 +938,7 @@ func (s *Server) handleConsentPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func consentContentSecurityPolicy(scriptNonce string) string {
-	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "'; base-uri 'none'; frame-ancestors 'none'"
+	return "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + scriptNonce + "' 'self'; base-uri 'none'; frame-ancestors 'none'"
 }
 
 func (s *Server) findAuthRequest(ctx context.Context, requestedBackend, state string) (storage.AuthRequest, backends.Backend, error) {
