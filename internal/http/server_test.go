@@ -69,6 +69,7 @@ func TestIndexLandingPage(t *testing.T) {
 		"http://bridge.example/authorize",
 		"http://bridge.example/token",
 		"http://bridge.example/.well-known/oauth-authorization-server",
+		"http://bridge.example/test",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("landing page missing %q", want)
@@ -252,8 +253,197 @@ func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "http://auth.example/ auth-sub") {
 		t.Fatalf("setup page does not contain identity metadata: %s", rec.Body.String())
 	}
+	for _, fragment := range []string{
+		`rel=&#34;indieauth-metadata&#34;`,
+		`rel=&#34;authorization_endpoint&#34;`,
+		`rel=&#34;token_endpoint&#34;`,
+		`name="identity_token"`,
+		`Check profile`,
+		`embedded IndieAuth tester`,
+	} {
+		if !strings.Contains(rec.Body.String(), fragment) {
+			t.Fatalf("setup page missing %q: %s", fragment, rec.Body.String())
+		}
+	}
 	if rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("setup response should not be cached")
+	}
+}
+
+func TestSetupCheckValidatesAuthenticatedProfileBinding(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.DynamicProfiles.Enabled = true
+	app.cfg.DynamicProfiles.Backend = "authentik"
+	identityToken, err := app.sealSetupIdentity("http://auth.example/", "auth-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`
+<link rel="indieauth-metadata" href="http://bridge.example/.well-known/oauth-authorization-server">
+<meta name="indieauth-identity" content="http://auth.example/ auth-sub">
+`))
+	}))
+	defer profileServer.Close()
+	app.httpClient = profileServer.Client()
+	form := url.Values{
+		"me":             {profileServer.URL},
+		"identity_token": {identityToken},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/setup/check", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Profile is ready") {
+		t.Fatalf("profile check failed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEmbeddedIndieAuthClientFlow(t *testing.T) {
+	app := newTestServer(t)
+	var challenge string
+	var bridgeServer *httptest.Server
+	bridgeHandler := app.Routes()
+	bridgeServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/profile":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`
+<link rel="indieauth-metadata" href="` + bridgeServer.URL + `/as/metadata">
+`))
+		case "/as/metadata":
+			writeJSON(w, http.StatusOK, map[string]string{
+				"issuer":                 bridgeServer.URL,
+				"authorization_endpoint": bridgeServer.URL + "/as/authorize",
+				"token_endpoint":         bridgeServer.URL + "/as/token",
+			})
+		case "/as/token":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+			if base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
+				http.Error(w, "bad verifier", http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"access_token": "test-access-token",
+				"me":           bridgeServer.URL + "/profile",
+				"profile":      map[string]string{"name": "Test User"},
+				"scope":        "profile email",
+				"token_type":   "Bearer",
+			})
+		default:
+			bridgeHandler.ServeHTTP(w, r)
+		}
+	}))
+	defer bridgeServer.Close()
+	app.cfg.Server.PublicURL = bridgeServer.URL
+	app.cfg.Server.Issuer = bridgeServer.URL
+	app.httpClient = bridgeServer.Client()
+
+	rec := httptest.NewRecorder()
+	form := url.Values{"me": {bridgeServer.URL + "/profile"}}
+	req := httptest.NewRequest(http.MethodPost, "/test/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("test start status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	authorizationURL, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge = authorizationURL.Query().Get("code_challenge")
+	if authorizationURL.Path != "/as/authorize" || challenge == "" {
+		t.Fatalf("unexpected authorization redirect: %s", authorizationURL.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("test client did not set state cookie")
+	}
+
+	callbackURL := "/test/callback?code=test-code&state=" +
+		url.QueryEscape(authorizationURL.Query().Get("state")) +
+		"&iss=" + url.QueryEscape(bridgeServer.URL)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(cookies[0])
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test callback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"IndieAuth test completed", "test-access-token", "Test User"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("test result missing %q: %s", want, rec.Body.String())
+		}
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("test result must not be cached")
+	}
+}
+
+func TestEmbeddedIndieAuthClientLegacyVerification(t *testing.T) {
+	app := newTestServer(t)
+	var bridgeServer *httptest.Server
+	bridgeHandler := app.Routes()
+	bridgeServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/profile":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<link rel="authorization_endpoint" href="` + bridgeServer.URL + `/legacy-authorize">`))
+		case "/legacy-authorize":
+			if r.Method != http.MethodPost {
+				http.Error(w, "expected legacy verification POST", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
+			_, _ = w.Write([]byte(url.Values{
+				"me":      {bridgeServer.URL + "/profile"},
+				"profile": {`{"name":"Legacy User"}`},
+			}.Encode()))
+		default:
+			bridgeHandler.ServeHTTP(w, r)
+		}
+	}))
+	defer bridgeServer.Close()
+	app.cfg.Server.PublicURL = bridgeServer.URL
+	app.cfg.Server.Issuer = bridgeServer.URL
+	app.httpClient = bridgeServer.Client()
+
+	form := url.Values{"me": {bridgeServer.URL + "/profile"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/test/start", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("legacy test start status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	authorizationURL, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorizationURL.Query().Get("code_challenge") != "" || authorizationURL.Query().Get("response_type") != "" {
+		t.Fatalf("legacy request should not include modern parameters: %s", authorizationURL.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("test client did not set state cookie")
+	}
+
+	rec = httptest.NewRecorder()
+	callbackURL := "/test/callback?code=legacy-code&state=" + url.QueryEscape(authorizationURL.Query().Get("state"))
+	req = httptest.NewRequest(http.MethodGet, callbackURL, nil)
+	req.AddCookie(cookies[0])
+	app.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy callback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"IndieAuth test completed", "Legacy verification response", "Legacy User"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("legacy test result missing %q: %s", want, rec.Body.String())
+		}
 	}
 }
 

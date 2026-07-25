@@ -186,6 +186,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
       <div class="actions">
         <a class="button" href="{{.MetadataURL}}">View metadata</a>
         {{if .SetupURL}}<a class="button secondary" href="{{.SetupURL}}">Get profile tag</a>{{end}}
+        <a class="button secondary" href="{{.TestURL}}">Test IndieAuth</a>
         <a class="button secondary" href="{{.HealthURL}}">Check health</a>
       </div>
     </header>
@@ -226,19 +227,40 @@ var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
     :root { color-scheme: light; --bg: #f7f8f5; --surface: #fff; --ink: #1b1f23; --muted: #5f6b76; --line: #d9dfdf; --accent: #0f766e; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
-    main { width: min(760px, calc(100% - 28px)); padding: 28px 0; }
-    h1 { margin: 0 0 12px; font-size: 32px; line-height: 1.1; }
-    p { color: var(--muted); }
+    main { width: min(820px, calc(100% - 28px)); padding: 32px 0; }
+    h1 { margin: 0 0 12px; font-size: 34px; line-height: 1.1; }
+    h2 { margin: 28px 0 8px; font-size: 21px; }
+    p, li { color: var(--muted); }
     pre { overflow-x: auto; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); white-space: pre-wrap; word-break: break-all; }
+    form { display: flex; gap: 10px; margin-top: 12px; }
+    input[type="url"] { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
+    button { padding: 11px 16px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
     a { color: var(--accent); font-weight: 700; }
+    @media (max-width: 620px) { form { flex-direction: column; } }
   </style>
 </head>
 <body>
   <main>
-    <h1>Your IndieAuth identity tag</h1>
-    <p>Add this tag inside the <code>&lt;head&gt;</code> of every profile page that should authenticate as this account.</p>
-    <pre><code>{{.MetadataTag}}</code></pre>
-    <p>The value is a public identifier, not a credential. Removing the tag revokes the profile binding.</p>
+    <h1>Connect a profile to IndieAuth</h1>
+    <p>You are signed in. Add both fragments below anywhere inside the profile page's <code>&lt;head&gt;</code>. They tell IndieAuth clients where to log in and tell this bridge which Authentik account owns the page.</p>
+
+    <h2>1. Advertise the IndieAuth endpoints</h2>
+    <pre><code>{{.DiscoveryFragment}}</code></pre>
+
+    <h2>2. Link the page to your Authentik identity</h2>
+    <pre><code>{{.IdentityFragment}}</code></pre>
+    <p>This identifier is public, not a password. You may use the same identity fragment on any number of profile pages. Removing it revokes that page's binding.</p>
+
+    <h2>3. Check the published page</h2>
+    <p>Deploy the page, then enter its full URL. The bridge will verify the endpoint links and confirm that the identity tag matches the account you just used.</p>
+    <form method="post" action="{{.CheckAction}}">
+      <input type="hidden" name="identity_token" value="{{.IdentityToken}}">
+      <input name="me" type="url" inputmode="url" placeholder="https://example.com/" required>
+      <button type="submit">Check profile</button>
+    </form>
+
+    <h2>4. Exercise the complete login</h2>
+    <p>Use the <a href="{{.TestURL}}">embedded IndieAuth tester</a> to run a real PKCE login and inspect the authorization and token responses.</p>
     <p><a href="{{.HomeURL}}">Return to the bridge</a></p>
   </main>
 </body>
@@ -319,6 +341,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /setup", s.handleSetup)
+	mux.HandleFunc("POST /setup/check", s.handleSetupCheck)
+	mux.HandleFunc("GET /test", s.handleTestClient)
+	mux.HandleFunc("POST /test/start", s.handleTestStart)
+	mux.HandleFunc("GET /test/callback", s.handleTestCallback)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleMetadata)
 	mux.HandleFunc("GET /authorize", s.handleAuthorize)
 	mux.HandleFunc("POST /authorize", s.handleAuthorizationCodeProfile)
@@ -340,6 +366,9 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		"/authorize":     true,
 		"/auth/callback": true,
 		"/setup":         true,
+		"/setup/check":   true,
+		"/test/start":    true,
+		"/test/callback": true,
 		"/consent":       true,
 		"/token":         true,
 		"/introspect":    true,
@@ -379,6 +408,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"TokenURL":     s.cfg.Server.PublicURL + "/token",
 		"MetadataURL":  s.cfg.Server.PublicURL + "/.well-known/oauth-authorization-server",
 		"HealthURL":    s.cfg.Server.PublicURL + "/healthz",
+		"TestURL":      s.cfg.Server.PublicURL + "/test",
 		"SetupURL": func() string {
 			if s.cfg.DynamicProfiles.Enabled {
 				return s.cfg.Server.PublicURL + "/setup"
@@ -696,19 +726,42 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderSetupIdentity(w http.ResponseWriter, identity backends.Identity, issuer string) {
-	metadataTag := fmt.Sprintf(
+	identityFragment := fmt.Sprintf(
 		`<meta name="%s" content="%s %s">`,
 		s.cfg.DynamicProfiles.MetadataName,
 		issuer,
 		identity.Subject,
 	)
+	discoveryFragment := strings.Join([]string{
+		fmt.Sprintf(
+			`<link rel="indieauth-metadata" href="%s/.well-known/oauth-authorization-server">`,
+			s.cfg.Server.PublicURL,
+		),
+		fmt.Sprintf(
+			`<link rel="authorization_endpoint" href="%s/authorize">`,
+			s.cfg.Server.PublicURL,
+		),
+		fmt.Sprintf(
+			`<link rel="token_endpoint" href="%s/token">`,
+			s.cfg.Server.PublicURL,
+		),
+	}, "\n")
+	identityToken, err := s.sealSetupIdentity(issuer, identity.Subject)
+	if err != nil {
+		http.Error(w, "setup page creation failed", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if err := setupTemplate.Execute(w, map[string]any{
-		"MetadataTag": metadataTag,
-		"HomeURL":     s.cfg.Server.PublicURL + "/",
+		"DiscoveryFragment": discoveryFragment,
+		"IdentityFragment":  identityFragment,
+		"IdentityToken":     identityToken,
+		"CheckAction":       s.cfg.Server.PublicURL + "/setup/check",
+		"TestURL":           s.cfg.Server.PublicURL + "/test",
+		"HomeURL":           s.cfg.Server.PublicURL + "/",
 	}); err != nil {
 		s.logger.Error("setup page render failed", "err", err)
 	}

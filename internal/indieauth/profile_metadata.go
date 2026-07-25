@@ -49,13 +49,10 @@ func DiscoverProfileIdentity(
 	if profileURL.Path == "" {
 		profileURL.Path = "/"
 	}
-	if err := validateMetadataFetchTarget(ctx, profileURL, allowHTTP); err != nil {
+	httpClient, err = SafeHTTPClient(ctx, httpClient, profileURL, allowHTTP, true)
+	if err != nil {
 		return ProfileIdentityBinding{}, err
 	}
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 5 * time.Second}
-	}
-	httpClient = profileClientWithRedirectGuard(httpClient, profileURL, allowHTTP)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, profileURL.String(), nil)
@@ -98,7 +95,22 @@ func DiscoverProfileIdentity(
 	return ProfileIdentityBinding{Me: canonicalMe, Issuer: issuer, Subject: subject}, nil
 }
 
-func profileClientWithRedirectGuard(base *http.Client, original *url.URL, allowPrivate bool) *http.Client {
+// SafeHTTPClient returns a copy of base that can only connect to the validated
+// public target. DNS is resolved again inside DialContext so a DNS rebinding
+// between validation and connection cannot reach a private address.
+func SafeHTTPClient(
+	ctx context.Context,
+	base *http.Client,
+	original *url.URL,
+	allowPrivate bool,
+	allowSameOriginRedirects bool,
+) (*http.Client, error) {
+	if err := validateMetadataFetchTarget(ctx, original, allowPrivate); err != nil {
+		return nil, err
+	}
+	if base == nil {
+		base = &http.Client{Timeout: 5 * time.Second}
+	}
 	client := *base
 	if !allowPrivate {
 		var transport *http.Transport
@@ -137,15 +149,18 @@ func profileClientWithRedirectGuard(base *http.Client, original *url.URL, allowP
 		client.Transport = transport
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !allowSameOriginRedirects {
+			return errors.New("redirects are not allowed")
+		}
 		if len(via) >= 3 {
-			return errors.New("too many profile redirects")
+			return errors.New("too many redirects")
 		}
 		if !security.SameOrigin(original, req.URL) {
-			return errors.New("profile redirects must remain on the same origin")
+			return errors.New("redirects must remain on the same origin")
 		}
 		return validateMetadataFetchTarget(req.Context(), req.URL, allowPrivate)
 	}
-	return &client
+	return &client, nil
 }
 
 func identityMetadataFromHTML(body []byte, metadataName string, allowHTTP bool) (string, string, error) {

@@ -173,7 +173,9 @@ In authentik:
 
 For dynamic profiles, sign in at
 `https://indieauth.example.org/setup` and copy the generated metadata tag into
-the `<head>` of every profile page that should use the account:
+the `<head>` of every profile page that should use the account. The setup page
+shows the complete discovery and identity fragments and can validate a
+published profile URL against the account used during setup:
 
 ```html
 <meta name="indieauth-identity" content="https://auth.example.org/application/o/indieauth/ authentik-user-sub">
@@ -182,6 +184,26 @@ the `<head>` of every profile page that should use the account:
 The page is the source of truth. Adding the same tag to multiple profile URLs
 links all of them to one OIDC identity; removing it revokes the binding. The
 identifier is public and allows those profile URLs to be correlated.
+
+## Embedded Login Tester
+
+`https://indieauth.example.org/test` is a generic IndieAuth client for
+end-to-end testing. Enter any public profile URL and it will:
+
+1. Fetch the profile and discover modern `indieauth-metadata` or legacy
+   authorization/token endpoint links.
+2. Start an authorization-code flow with PKCE using the tester URL as the
+   IndieAuth `client_id`.
+3. Validate callback state and the authorization issuer when the server
+   advertises one.
+4. Exchange the code at the token endpoint, or verify it at the authorization
+   endpoint for legacy Web Sign-In profiles, then show all returned data.
+
+Test state is authenticated and encrypted in a short-lived, HttpOnly,
+SameSite cookie. The callback result is marked `no-store`; access tokens are
+displayed once and are not persisted by the bridge. Profile, authorization
+metadata, and token endpoint connections use the same public-address and
+DNS-rebinding protections as dynamic profile discovery.
 
 Static profile selectors remain available for compatibility:
 
@@ -403,6 +425,11 @@ Primary threats and mitigations:
   subject in constant time.
 - Dynamic profile SSRF: profile fetches reject local and private targets, limit
   redirects to the original origin, and cap response time and size.
+- Tester mix-up and request forgery: the embedded client uses cryptographically
+  protected short-lived state, PKCE S256, issuer checking when advertised, and
+  an HttpOnly SameSite cookie.
+- Tester token handling: token responses are never logged or persisted and are
+  returned only on a `no-store` result page.
 - Unwanted approvals: consent is enabled by default so the user sees the client, redirect URI, profile, and requested scope before code issuance.
 
 Operational responsibilities:
