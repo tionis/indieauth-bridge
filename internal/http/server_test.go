@@ -384,6 +384,22 @@ func TestEmbeddedIndieAuthClientFlow(t *testing.T) {
 	}
 }
 
+func TestEmbeddedIndieAuthClientAllowsDiscoveredAuthorizationRedirect(t *testing.T) {
+	app := newTestServer(t)
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/test", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test page status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "form-action") {
+		t.Fatalf("test page CSP must allow redirects to discovered authorization servers, got %q", csp)
+	}
+	if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Fatalf("test page CSP lost baseline protections: %q", csp)
+	}
+}
+
 func TestEmbeddedIndieAuthClientLegacyVerification(t *testing.T) {
 	app := newTestServer(t)
 	var bridgeServer *httptest.Server
