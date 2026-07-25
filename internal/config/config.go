@@ -33,12 +33,13 @@ func (d Duration) MarshalYAML() (any, error) {
 }
 
 type Config struct {
-	Server    ServerConfig             `yaml:"server"`
-	Security  SecurityConfig           `yaml:"security"`
-	RateLimit RateLimitConfig          `yaml:"rate_limit"`
-	Profiles  []ProfileConfig          `yaml:"profiles"`
-	Backends  map[string]BackendConfig `yaml:"backends"`
-	Storage   StorageConfig            `yaml:"storage"`
+	Server          ServerConfig             `yaml:"server"`
+	Security        SecurityConfig           `yaml:"security"`
+	RateLimit       RateLimitConfig          `yaml:"rate_limit"`
+	DynamicProfiles DynamicProfilesConfig    `yaml:"dynamic_profiles"`
+	Profiles        []ProfileConfig          `yaml:"profiles"`
+	Backends        map[string]BackendConfig `yaml:"backends"`
+	Storage         StorageConfig            `yaml:"storage"`
 }
 
 type ServerConfig struct {
@@ -65,6 +66,12 @@ type RateLimitConfig struct {
 	RequestsPerMinute int      `yaml:"requests_per_minute"`
 	Burst             int      `yaml:"burst"`
 	TrustedProxies    []string `yaml:"trusted_proxies"`
+}
+
+type DynamicProfilesConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	Backend      string `yaml:"backend"`
+	MetadataName string `yaml:"metadata_name"`
 }
 
 type ProfileConfig struct {
@@ -111,6 +118,9 @@ func Default() Config {
 			Enabled:           true,
 			RequestsPerMinute: 60,
 			Burst:             20,
+		},
+		DynamicProfiles: DynamicProfilesConfig{
+			MetadataName: "indieauth-identity",
 		},
 		Backends: map[string]BackendConfig{},
 		Storage: StorageConfig{
@@ -250,8 +260,8 @@ func (cfg *Config) Validate() error {
 	if cfg.RateLimit.Burst <= 0 {
 		cfg.RateLimit.Burst = 20
 	}
-	if len(cfg.Profiles) == 0 {
-		return errors.New("at least one profile is required")
+	if len(cfg.Profiles) == 0 && !cfg.DynamicProfiles.Enabled {
+		return errors.New("at least one profile or dynamic_profiles.enabled is required")
 	}
 	seenProfiles := map[string]bool{}
 	for i := range cfg.Profiles {
@@ -291,6 +301,20 @@ func (cfg *Config) Validate() error {
 		if len(b.Scopes) == 0 {
 			b.Scopes = []string{"openid", "profile", "email"}
 			cfg.Backends[name] = b
+		}
+	}
+	if cfg.DynamicProfiles.Enabled {
+		if cfg.DynamicProfiles.Backend == "" {
+			return errors.New("dynamic_profiles.backend is required when dynamic profiles are enabled")
+		}
+		if _, ok := cfg.Backends[cfg.DynamicProfiles.Backend]; !ok {
+			return fmt.Errorf("dynamic_profiles.backend %q is not configured", cfg.DynamicProfiles.Backend)
+		}
+		if strings.TrimSpace(cfg.DynamicProfiles.MetadataName) == "" {
+			return errors.New("dynamic_profiles.metadata_name is required when dynamic profiles are enabled")
+		}
+		if strings.ContainsAny(cfg.DynamicProfiles.MetadataName, " \t\r\n\"'<>") {
+			return errors.New("dynamic_profiles.metadata_name contains invalid characters")
 		}
 	}
 	if cfg.Storage.Type == "" {

@@ -68,6 +68,9 @@ func TestUnsafeMetadataIP(t *testing.T) {
 	if !isUnsafeMetadataIP(net.ParseIP("169.254.169.254")) {
 		t.Fatal("link-local IP should be unsafe")
 	}
+	if !isUnsafeMetadataIP(net.ParseIP("100.100.100.200")) {
+		t.Fatal("carrier-grade NAT and cloud metadata addresses should be unsafe")
+	}
 	if isUnsafeMetadataIP(net.ParseIP("203.0.113.1")) {
 		t.Fatal("documentation public IP should not be treated as unsafe")
 	}

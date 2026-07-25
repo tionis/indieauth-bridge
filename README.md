@@ -29,7 +29,10 @@ sequenceDiagram
 
 ## Security Model
 
-The bridge is an authorization server for a small, explicitly configured set of profile URLs. It does not manage users. A login succeeds only when the OIDC identity returned by authentik matches at least one configured selector for the requested `me` URL: subject, username, email, or group.
+The bridge is an authorization server for profile URLs that delegate to it. It
+does not manage users. Profiles can publish an OIDC issuer and stable subject in
+their HTML, or use an explicit compatibility mapping. A login succeeds only
+when the verified OIDC identity matches the binding for the requested `me` URL.
 
 Secure defaults:
 
@@ -59,7 +62,8 @@ cp examples/config.yaml config.yaml
 chmod 600 config.yaml
 ```
 
-Edit the public bridge URL, authentik settings, and profile mapping. Use a strong random `security.cookie_secret`.
+Edit the public bridge URL, authentik settings, and dynamic profile backend.
+Use a strong random `security.cookie_secret`.
 
 Run locally with Podman:
 
@@ -102,6 +106,11 @@ rate_limit:
   burst: 20
   trusted_proxies: []
 
+dynamic_profiles:
+  enabled: true
+  backend: "authentik"
+  metadata_name: "indieauth-identity"
+
 profiles:
   - me: "https://eric.example/"
     display_name: "Eric"
@@ -124,6 +133,9 @@ storage:
   type: "sqlite"
   path: "/data/bridge.db"
 ```
+
+`profiles` is optional when dynamic profiles are enabled. Static profiles take
+precedence when a URL is present in both modes.
 
 Environment overrides use the `IAB_` prefix:
 
@@ -156,9 +168,22 @@ In authentik:
 4. Set redirect URI to `https://indieauth.example.org/auth/callback`.
 5. Enable scopes `openid`, `profile`, and `email`.
 6. Copy the issuer URL, client ID, and client secret into the bridge config.
-7. Configure the bridge profile mapping so the authentik user can claim the desired IndieAuth profile URL.
+7. Keep the provider's subject mode on a stable user identifier, rather than a
+   mutable username.
 
-Recommended selectors:
+For dynamic profiles, sign in at
+`https://indieauth.example.org/setup` and copy the generated metadata tag into
+the `<head>` of every profile page that should use the account:
+
+```html
+<meta name="indieauth-identity" content="https://auth.example.org/application/o/indieauth/ authentik-user-sub">
+```
+
+The page is the source of truth. Adding the same tag to multiple profile URLs
+links all of them to one OIDC identity; removing it revokes the binding. The
+identifier is public and allows those profile URLs to be correlated.
+
+Static profile selectors remain available for compatibility:
 
 - Use `allowed_subjects` for the strongest stable mapping.
 - Add `allowed_usernames` or `allowed_emails` only when you understand how those claims are managed in your authentik tenant.
@@ -186,6 +211,7 @@ Add IndieAuth discovery links to the HTML for your profile URL:
 <link rel="indieauth-metadata" href="https://indieauth.example.org/.well-known/oauth-authorization-server">
 <link rel="authorization_endpoint" href="https://indieauth.example.org/authorize">
 <link rel="token_endpoint" href="https://indieauth.example.org/token">
+<meta name="indieauth-identity" content="https://auth.example.org/application/o/indieauth/ authentik-user-sub">
 ```
 
 IndieAuth clients whose callback URL is not the same origin as `client_id` should publish client metadata at their `client_id` URL. The bridge accepts either JSON:
@@ -371,6 +397,12 @@ Primary threats and mitigations:
 - OIDC replay or mix-up: backend state and nonce are stored server-side and checked on callback; ID tokens are verified for issuer, audience, expiry, signature, and nonce by `go-oidc`.
 - Token database disclosure: authorization codes and access tokens are stored as SHA-256 hashes.
 - Profile claim confusion: a backend identity must match explicit configured selectors for the requested `me`.
+- Dynamic profile impersonation: the bridge fetches the requested profile over
+  HTTPS, requires it to delegate IndieAuth back to this bridge, snapshots its
+  issuer/subject binding before OIDC login, and compares the returned stable
+  subject in constant time.
+- Dynamic profile SSRF: profile fetches reject local and private targets, limit
+  redirects to the original origin, and cap response time and size.
 - Unwanted approvals: consent is enabled by default so the user sees the client, redirect URI, profile, and requested scope before code issuance.
 
 Operational responsibilities:
@@ -384,7 +416,11 @@ Operational responsibilities:
 ## Troubleshooting
 
 - `invalid redirect_uri`: ensure the IndieAuth client's `redirect_uri` has the same origin as `client_id` or is declared in client metadata.
-- `unknown me URL`: the submitted `me` URL must canonicalize to one of the configured `profiles[].me` values.
+- `unknown me URL`: dynamic profiles are disabled and the submitted `me` URL
+  does not canonicalize to one of the configured `profiles[].me` values.
+- `profile identity metadata could not be verified`: the page is unavailable,
+  does not delegate to this bridge, or has missing, ambiguous, or mismatched
+  `indieauth-identity` metadata.
 - `invalid or expired state`: the OIDC callback is stale, repeated, or did not originate from this bridge.
 - `identity is not allowed`: the authentik user authenticated correctly but does not match the requested profile mapping.
 - OIDC discovery failures: verify the authentik issuer URL and that the bridge can reach authentik from the container network.

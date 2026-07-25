@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,13 @@ type Server struct {
 	httpClient *http.Client
 	limiter    *rateLimiter
 }
+
+const (
+	backendStateDynamicProfile = "indieauth_dynamic_profile"
+	backendStateProfileIssuer  = "indieauth_profile_issuer"
+	backendStateProfileSubject = "indieauth_profile_subject"
+	backendStateSetup          = "indieauth_setup"
+)
 
 var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype html>
 <html lang="en">
@@ -174,9 +182,10 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
     <header>
       <div class="eyebrow">IndieAuth authorization server</div>
       <h1>Sign in with a profile URL through your OIDC provider.</h1>
-      <p class="lede">This bridge accepts IndieAuth authorization requests for configured profile URLs and delegates authentication to an OIDC backend such as authentik.</p>
+      <p class="lede">This bridge resolves identity metadata from IndieAuth profile URLs and delegates authentication to an OIDC backend such as authentik.</p>
       <div class="actions">
         <a class="button" href="{{.MetadataURL}}">View metadata</a>
+        {{if .SetupURL}}<a class="button secondary" href="{{.SetupURL}}">Get profile tag</a>{{end}}
         <a class="button secondary" href="{{.HealthURL}}">Check health</a>
       </div>
     </header>
@@ -185,7 +194,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
       <h2 id="status-heading">Status</h2>
       <div class="grid">
         <div class="metric"><span>Issuer</span><strong>{{.Issuer}}</strong></div>
-        <div class="metric"><span>Profiles</span><strong>{{.ProfileCount}}</strong></div>
+        <div class="metric"><span>Static profiles</span><strong>{{.ProfileCount}}</strong></div>
         <div class="metric"><span>Backends</span><strong>{{.BackendNames}}</strong></div>
       </div>
       {{if .DevMode}}<p class="note">Development mode is enabled. Do not use this configuration for public traffic.</p>{{end}}
@@ -203,6 +212,34 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
     <footer>
       Publish the metadata, authorization, and token links from your profile site so IndieAuth clients can discover this bridge.
     </footer>
+  </main>
+</body>
+</html>`))
+
+var setupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IndieAuth Profile Tag</title>
+  <style>
+    :root { color-scheme: light; --bg: #f7f8f5; --surface: #fff; --ink: #1b1f23; --muted: #5f6b76; --line: #d9dfdf; --accent: #0f766e; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; }
+    main { width: min(760px, calc(100% - 28px)); padding: 28px 0; }
+    h1 { margin: 0 0 12px; font-size: 32px; line-height: 1.1; }
+    p { color: var(--muted); }
+    pre { overflow-x: auto; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); white-space: pre-wrap; word-break: break-all; }
+    a { color: var(--accent); font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Your IndieAuth identity tag</h1>
+    <p>Add this tag inside the <code>&lt;head&gt;</code> of every profile page that should authenticate as this account.</p>
+    <pre><code>{{.MetadataTag}}</code></pre>
+    <p>The value is a public identifier, not a credential. Removing the tag revokes the profile binding.</p>
+    <p><a href="{{.HomeURL}}">Return to the bridge</a></p>
   </main>
 </body>
 </html>`))
@@ -281,6 +318,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /setup", s.handleSetup)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleMetadata)
 	mux.HandleFunc("GET /authorize", s.handleAuthorize)
 	mux.HandleFunc("POST /authorize", s.handleAuthorizationCodeProfile)
@@ -301,6 +339,7 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 	limited := map[string]bool{
 		"/authorize":     true,
 		"/auth/callback": true,
+		"/setup":         true,
 		"/consent":       true,
 		"/token":         true,
 		"/introspect":    true,
@@ -340,6 +379,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"TokenURL":     s.cfg.Server.PublicURL + "/token",
 		"MetadataURL":  s.cfg.Server.PublicURL + "/.well-known/oauth-authorization-server",
 		"HealthURL":    s.cfg.Server.PublicURL + "/healthz",
+		"SetupURL": func() string {
+			if s.cfg.DynamicProfiles.Enabled {
+				return s.cfg.Server.PublicURL + "/setup"
+			}
+			return ""
+		}(),
 		"ProfileCount": len(s.cfg.Profiles),
 		"BackendNames": strings.Join(names, ", "),
 		"DevMode":      s.cfg.Security.DevMode,
@@ -371,6 +416,47 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.DynamicProfiles.Enabled {
+		http.NotFound(w, r)
+		return
+	}
+	backendName := s.cfg.DynamicProfiles.Backend
+	backend := s.backends[backendName]
+	if backend == nil {
+		http.Error(w, "profile backend is not available", http.StatusInternalServerError)
+		return
+	}
+	requestID, err := security.RandomToken()
+	if err != nil {
+		http.Error(w, "setup request creation failed", http.StatusInternalServerError)
+		return
+	}
+	redirectURL, backendState, err := backend.BeginAuth(r.Context(), backends.AuthRequest{RequestID: requestID})
+	if err != nil {
+		s.logger.Error("setup backend begin auth failed", "backend", backendName, "err", err)
+		http.Error(w, "backend authorization failed", http.StatusBadGateway)
+		return
+	}
+	if backendState.Values == nil {
+		backendState.Values = map[string]any{}
+	}
+	backendState.Values[backendStateSetup] = true
+	now := s.now()
+	if err := s.store.CreateAuthRequest(r.Context(), storage.AuthRequest{
+		ID:           requestID,
+		Backend:      backendName,
+		BackendState: backendState,
+		ExpiresAt:    now.Add(s.cfg.Security.AuthRequestTTL.Duration),
+		CreatedAt:    now,
+	}); err != nil {
+		s.logger.Error("setup auth request creation failed", "err", err)
+		http.Error(w, "setup request creation failed", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if responseType := q.Get("response_type"); responseType != "" && responseType != "code" {
@@ -386,19 +472,29 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported scope", http.StatusBadRequest)
 		return
 	}
-	profile, ok := s.cfg.ProfileByMe(q.Get("me"))
-	if !ok {
+	allowHTTP := s.cfg.Security.DevMode || !s.cfg.Security.RequireHTTPS
+	meURL, err := security.ValidateHTTPSURL(q.Get("me"), allowHTTP)
+	if err != nil {
+		http.Error(w, "invalid me URL", http.StatusBadRequest)
+		return
+	}
+	me, err := security.CanonicalURL(meURL.String())
+	if err != nil {
+		http.Error(w, "invalid me URL", http.StatusBadRequest)
+		return
+	}
+	profile, staticProfile := s.cfg.ProfileByMe(me)
+	if !staticProfile && !s.cfg.DynamicProfiles.Enabled {
 		http.Error(w, "unknown me URL", http.StatusBadRequest)
 		return
 	}
-	allowHTTP := s.cfg.Security.DevMode || !s.cfg.Security.RequireHTTPS
 	if _, err := security.ValidateHTTPSURL(q.Get("client_id"), allowHTTP); err != nil {
 		http.Error(w, "invalid client_id", http.StatusBadRequest)
 		return
 	}
 	if err := indieauth.ValidateClientRedirect(r.Context(), s.httpClient, q.Get("client_id"), q.Get("redirect_uri"), allowHTTP, s.cfg.Security.ClientMetadataDiscoveryEnabled); err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
-		s.audit(r.Context(), "auth_request_rejected", "", profile.Me, q.Get("client_id"))
+		s.audit(r.Context(), "auth_request_rejected", "", me, q.Get("client_id"))
 		return
 	}
 	challenge := q.Get("code_challenge")
@@ -412,6 +508,30 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	} else if challenge != "" && challengeMethod != "S256" {
 		http.Error(w, "code_challenge_method must be S256", http.StatusBadRequest)
 		return
+	}
+	var dynamicBinding indieauth.ProfileIdentityBinding
+	if !staticProfile {
+		dynamicBackend := s.cfg.DynamicProfiles.Backend
+		backendConfig := s.cfg.Backends[dynamicBackend]
+		dynamicBinding, err = indieauth.DiscoverProfileIdentity(
+			r.Context(),
+			s.httpClient,
+			me,
+			allowHTTP,
+			s.cfg.DynamicProfiles.MetadataName,
+			s.cfg.Server.PublicURL,
+			backendConfig.Issuer,
+		)
+		if err != nil {
+			s.logger.Warn("dynamic profile discovery rejected", "me", me, "err", err)
+			s.audit(r.Context(), "profile_metadata_rejected", "", me, q.Get("client_id"))
+			http.Error(w, "profile identity metadata could not be verified", http.StatusBadRequest)
+			return
+		}
+		profile = config.ProfileConfig{
+			Me:      dynamicBinding.Me,
+			Backend: dynamicBackend,
+		}
 	}
 	backend := s.backends[profile.Backend]
 	if backend == nil {
@@ -437,6 +557,14 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("backend begin auth failed", "backend", profile.Backend, "err", err)
 		http.Error(w, "backend authorization failed", http.StatusBadGateway)
 		return
+	}
+	if !staticProfile {
+		if backendState.Values == nil {
+			backendState.Values = map[string]any{}
+		}
+		backendState.Values[backendStateDynamicProfile] = true
+		backendState.Values[backendStateProfileIssuer] = dynamicBinding.Issuer
+		backendState.Values[backendStateProfileSubject] = dynamicBinding.Subject
 	}
 	now := s.now()
 	err = s.store.CreateAuthRequest(r.Context(), storage.AuthRequest{
@@ -487,8 +615,29 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
-	profile, ok := s.cfg.ProfileByMe(ar.Me)
-	if !ok || !indieauth.IdentityAllowed(profile, identity) {
+	if setup, _ := ar.BackendState.Values[backendStateSetup].(bool); setup {
+		s.renderSetupIdentity(w, identity, s.cfg.Backends[ar.Backend].Issuer)
+		return
+	}
+	profileJSON := ar.ProfileJSON
+	identityAllowed := false
+	if dynamicProfile, _ := ar.BackendState.Values[backendStateDynamicProfile].(bool); dynamicProfile {
+		expectedSubject, _ := ar.BackendState.Values[backendStateProfileSubject].(string)
+		expectedIssuer, _ := ar.BackendState.Values[backendStateProfileIssuer].(string)
+		identityAllowed = expectedIssuer == s.cfg.Backends[ar.Backend].Issuer &&
+			security.ConstantTimeEqual(expectedSubject, identity.Subject)
+		if identityAllowed {
+			profileJSON, err = indieauth.DynamicProfileJSON(ar.Me, identity)
+			if err != nil {
+				http.Error(w, "profile encoding failed", http.StatusInternalServerError)
+				return
+			}
+		}
+	} else {
+		profile, ok := s.cfg.ProfileByMe(ar.Me)
+		identityAllowed = ok && indieauth.IdentityAllowed(profile, identity)
+	}
+	if !identityAllowed {
 		s.logger.Warn("identity not allowed for profile", "backend", ar.Backend, "subject", identity.Subject, "me", ar.Me)
 		s.audit(r.Context(), "identity_claim_rejected", identity.Subject, ar.Me, ar.ClientID)
 		http.Error(w, "identity is not allowed for requested profile", http.StatusForbidden)
@@ -516,7 +665,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			ClientState:         ar.ClientState,
 			CodeChallenge:       ar.CodeChallenge,
 			CodeChallengeMethod: ar.CodeChallengeMethod,
-			ProfileJSON:         ar.ProfileJSON,
+			ProfileJSON:         profileJSON,
 			Subject:             identity.Subject,
 			ExpiresAt:           now.Add(s.cfg.Security.CodeTTL.Duration),
 			CreatedAt:           now,
@@ -538,11 +687,30 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		ClientState:         ar.ClientState,
 		CodeChallenge:       ar.CodeChallenge,
 		CodeChallengeMethod: ar.CodeChallengeMethod,
-		ProfileJSON:         ar.ProfileJSON,
+		ProfileJSON:         profileJSON,
 		Subject:             identity.Subject,
 	}); err != nil {
 		s.logger.Error("issue authorization code failed", "err", err)
 		http.Error(w, "code creation failed", http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) renderSetupIdentity(w http.ResponseWriter, identity backends.Identity, issuer string) {
+	metadataTag := fmt.Sprintf(
+		`<meta name="%s" content="%s %s">`,
+		s.cfg.DynamicProfiles.MetadataName,
+		issuer,
+		identity.Subject,
+	)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if err := setupTemplate.Execute(w, map[string]any{
+		"MetadataTag": metadataTag,
+		"HomeURL":     s.cfg.Server.PublicURL + "/",
+	}); err != nil {
+		s.logger.Error("setup page render failed", "err", err)
 	}
 }
 

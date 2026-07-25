@@ -16,8 +16,12 @@ import (
 )
 
 var (
-	linkTagRe = regexp.MustCompile(`(?is)<link\s+[^>]*>`)
-	attrRe    = regexp.MustCompile(`(?is)(rel|href)\s*=\s*["']([^"']+)["']`)
+	linkTagRe       = regexp.MustCompile(`(?is)<link\s+[^>]*>`)
+	attrRe          = regexp.MustCompile(`(?is)(rel|href)\s*=\s*["']([^"']+)["']`)
+	carrierGradeNAT = func() *net.IPNet {
+		_, network, _ := net.ParseCIDR("100.64.0.0/10")
+		return network
+	}()
 )
 
 type ClientMetadata struct {
@@ -129,6 +133,7 @@ func isUnsafeMetadataIP(ip net.IP) bool {
 	}
 	return ip.IsLoopback() ||
 		ip.IsPrivate() ||
+		carrierGradeNAT.Contains(ip) ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() ||

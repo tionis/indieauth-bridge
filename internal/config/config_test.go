@@ -79,3 +79,20 @@ func TestRejectWeakCookieSecretOutsideDev(t *testing.T) {
 		t.Fatalf("dev mode should allow placeholder secret: %v", err)
 	}
 }
+
+func TestDynamicProfilesAllowEmptyStaticProfileList(t *testing.T) {
+	cfg := Default()
+	cfg.Server.PublicURL = "https://bridge.example"
+	cfg.Security.CookieSecret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cfg.DynamicProfiles.Enabled = true
+	cfg.DynamicProfiles.Backend = "authentik"
+	cfg.Backends = map[string]BackendConfig{"authentik": {
+		Type: "authentik", Issuer: "https://auth.example/", ClientID: "id", ClientSecret: "secret", RedirectURI: "https://bridge.example/auth/callback",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("dynamic-only configuration should be valid: %v", err)
+	}
+	if cfg.DynamicProfiles.MetadataName != "indieauth-identity" {
+		t.Fatalf("unexpected metadata name: %s", cfg.DynamicProfiles.MetadataName)
+	}
+}

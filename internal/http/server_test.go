@@ -191,6 +191,72 @@ func TestAuthorizeCallbackAndTokenFlow(t *testing.T) {
 	}
 }
 
+func TestDynamicProfileAuthorizeAndCallback(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Profiles = nil
+	app.cfg.DynamicProfiles.Enabled = true
+	app.cfg.DynamicProfiles.Backend = "authentik"
+
+	profileServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`
+<link rel="indieauth-metadata" href="http://bridge.example/.well-known/oauth-authorization-server">
+<meta name="indieauth-identity" content="http://auth.example/ auth-sub">
+`))
+	}))
+	defer profileServer.Close()
+	app.httpClient = profileServer.Client()
+
+	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	authURL := "/authorize?response_type=code&me=" + url.QueryEscape(profileServer.URL) +
+		"&client_id=http%3A%2F%2Fclient.example%2Fapp&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback" +
+		"&state=client-state&scope=profile&code_challenge=" + url.QueryEscape(pkceChallenge(verifier)) +
+		"&code_challenge_method=S256"
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, authURL, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	callback, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callback.Query().Get("code") == "" {
+		t.Fatalf("dynamic profile callback did not issue a code: %s", callback.String())
+	}
+}
+
+func TestSetupReturnsAuthenticatedMetadataTag(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.DynamicProfiles.Enabled = true
+	app.cfg.DynamicProfiles.Backend = "authentik"
+	handler := app.Routes()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/setup", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("setup status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?state=oidc-state&code=oidc-code", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "http://auth.example/ auth-sub") {
+		t.Fatalf("setup page does not contain identity metadata: %s", rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("setup response should not be cached")
+	}
+}
+
 func TestConsentApprovalFlow(t *testing.T) {
 	app := newTestServer(t)
 	app.cfg.Security.ConsentRequired = true

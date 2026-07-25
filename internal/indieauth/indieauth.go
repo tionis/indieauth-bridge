@@ -74,3 +74,14 @@ func ProfileObject(profile config.ProfileConfig) map[string]any {
 func ProfileJSON(profile config.ProfileConfig) ([]byte, error) {
 	return json.Marshal(ProfileObject(profile))
 }
+
+func DynamicProfileJSON(me string, identity backends.Identity) ([]byte, error) {
+	profile := config.ProfileConfig{
+		Me:          me,
+		DisplayName: identity.Name,
+	}
+	if identity.EmailVerified {
+		profile.Email = identity.Email
+	}
+	return ProfileJSON(profile)
+}
