@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -26,6 +28,9 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "check-config" {
 		os.Exit(runCheckConfig(os.Args[2:], logger))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(runHealthcheck(os.Args[2:]))
 	}
 
 	configPath := flag.String("config", "", "path to config file")
@@ -85,6 +90,32 @@ func main() {
 		logger.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+func runHealthcheck(args []string) int {
+	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	target := fs.String("url", "http://127.0.0.1:8080/healthz", "health endpoint URL")
+	timeout := fs.Duration("timeout", 5*time.Second, "request timeout")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	parsed, err := url.ParseRequestURI(*target)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		fmt.Fprintln(os.Stderr, "healthcheck requires an absolute HTTP or HTTPS URL")
+		return 2
+	}
+	client := &http.Client{Timeout: *timeout}
+	resp, err := client.Get(parsed.String())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck request failed: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		fmt.Fprintf(os.Stderr, "healthcheck returned HTTP %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 func runCheckConfig(args []string, logger *slog.Logger) int {

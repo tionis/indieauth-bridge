@@ -334,6 +334,19 @@ server {
 
 If the bridge is behind trusted reverse proxies and you want rate limiting to use the original client IP from `X-Forwarded-For`, configure `server.trusted_proxies` or `rate_limit.trusted_proxies` with the proxy IPs or CIDR ranges. Do not trust forwarded headers from arbitrary clients.
 
+## Health Checks
+
+`GET /healthz` returns a successful empty response after the HTTP server is
+ready. The distroless image also exposes a config-independent client command so
+container runtimes do not need to add a shell or HTTP utility:
+
+```sh
+/indieauth-bridge healthcheck --url http://127.0.0.1:8080/healthz
+```
+
+The command accepts `--timeout` as a Go duration, exits zero only for a 2xx
+response, and rejects non-HTTP URLs.
+
 ## Backup and Restore
 
 SQLite state lives under the configured `storage.path`, normally `/data/bridge.db` in containers. Back up the database and its WAL sidecar files together:
